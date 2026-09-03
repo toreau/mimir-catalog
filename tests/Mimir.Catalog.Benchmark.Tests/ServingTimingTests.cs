@@ -217,3 +217,65 @@ public class ServingTimingTests
         }
     }
 }
+
+public class ServingTimingBoundaryTests
+{
+    private sealed class WatchList<T> : IReadOnlyList<T>
+    {
+        private readonly IReadOnlyList<T> _inner;
+        private int _enumerationCount;
+        private const int AllowedEnumerations = 2;
+
+        public WatchList(IReadOnlyList<T> inner) => _inner = inner;
+        public T this[int index] => _inner[index];
+        public int Count => _inner.Count;
+
+        public IEnumerator<T> GetEnumerator()
+        {
+            _enumerationCount++;
+            // A reintroduced timed .ToList()/enumeration would be the third
+            // enumeration (warmup canonical + warmup-copy + timed) and throws,
+            // making the run ERROR; the correct no-copy path stays VALID.
+            if (_enumerationCount > AllowedEnumerations) throw new InvalidOperationException("unexpected extra enumeration");
+            return _inner.GetEnumerator();
+        }
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+    }
+
+    private sealed class S2Candidate : IStorageCandidate
+    {
+        public List<LexicalHit> Hits { get; } = new();
+        public void Open() { }
+        public void Dispose() { }
+        public ConceptHit GetConcept(long qid) => new(false, false, false);
+        public IReadOnlyList<LexicalHit> LookupLexical(string lang, string value) => new WatchList<LexicalHit>(Hits);
+        public IReadOnlyList<LexicalRow> GetLexicalByQid(long qid) => Array.Empty<LexicalRow>();
+        public IReadOnlyList<long> GetInstanceOf(long subjectQid) => Array.Empty<long>();
+        public IReadOnlyList<long> GetSubclassOf(long subjectQid) => Array.Empty<long>();
+    }
+
+    [Fact]
+    public void S2TimedRegion_ContainsNoEnumeration_CanonicalizesAfterTimer()
+    {
+        var candidate = new S2Candidate { Hits = { new LexicalHit(7, "label") } };
+        var probe = new ServingProbe("S2", 1, "Hit", true, null, "en", "alpha");
+        var expected = new ServingWorkload
+        {
+            Probes = new[] { probe },
+            Expected = new Dictionary<(string, long), ServingExpected>
+            {
+                [("S2", 1L)] = new("S2", 1, true, 1,
+                    WorkloadOracle.LexMembersDigest(new List<(long, string)> { (7, "label") })),
+            },
+        };
+        var script = new ScriptedTimer(new double[] { 1.0 });
+        var exec = new ServingTimingRunner(candidate, expected, "S2", 1, () => script).Execute();
+
+        // If any timed .ToList()/enumeration had been reintroduced, the watch list
+        // would have been enumerated a third time and the run would be ERROR.
+        Assert.Equal(ServingStatuses.Valid, exec.Correctness);
+        Assert.Single(exec.Samples);
+        Assert.Equal(1.0, exec.Samples[0].WallSeconds);
+    }
+}

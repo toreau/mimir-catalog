@@ -74,6 +74,22 @@ public static class Program
     }
 
     private static int RunServingChild(ChildRequestEnvelope request, string requestPath)
+        => RunServingChildCore(
+            request,
+            requestPath,
+            dir => ServingWorkloadLoader.Load(dir),
+            () => new SqliteStorageCandidate(request.CandidatePath));
+
+    /// <summary>
+    /// Internal composition seam: production uses ServingWorkloadLoader.Load and
+    /// SqliteStorageCandidate; tests inject fixture loader/candidate while still
+    /// exercising the exact production artifact/envelope code paths.
+    /// </summary>
+    internal static int RunServingChildCore(
+        ChildRequestEnvelope request,
+        string requestPath,
+        Func<string, ServingWorkload> workloadLoader,
+        Func<IStorageCandidate> candidateFactory)
     {
         if (request.Operation is not ("S1" or "S2" or "S3" or "S4" or "S5"))
         {
@@ -81,11 +97,28 @@ public static class Program
             return ProtocolExitCodes.FatalProtocolError;
         }
 
+        // Workload loading validates authoritative benchmark input. A missing,
+        // corrupt or wrong-identity package is NOT a benchmark ERROR: no
+        // trustworthy envelope, no sample artifact, nonzero exit.
+        ServingWorkload workload;
+        try
+        {
+            workload = workloadLoader(request.WorkloadPath);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"child: workload load failure: {ex.Message}");
+            return ProtocolExitCodes.FatalProtocolError;
+        }
+
+        string artifactPath = ServingArtifactPath(requestPath);
+
+        // Candidate/runtime failures after a valid workload are a trustworthy
+        // serving ERROR with retained diagnostics and a zero-record artifact.
         ServingTimingExecution execution;
         try
         {
-            var workload = ServingWorkloadLoader.Load(request.WorkloadPath);
-            using var candidate = new SqliteStorageCandidate(request.CandidatePath);
+            using IStorageCandidate candidate = candidateFactory();
             candidate.Open();
             execution = new ServingTimingRunner(candidate, workload, request.Operation, request.Repetition).Execute();
         }
@@ -98,11 +131,12 @@ public static class Program
                 Correctness = ServingStatuses.Error,
                 Samples = Array.Empty<ServingTimedSample>(),
                 TimedPassWallSeconds = null,
+                ErrorCategory = "runtime",
+                ErrorMessage = ex.Message,
             };
             Console.Error.WriteLine($"child: serving execution failure: {ex.Message}");
         }
 
-        string artifactPath = ServingArtifactPath(requestPath);
         try
         {
             ServingSampleArtifact.WriteCreateNew(artifactPath, execution.Samples);
@@ -136,12 +170,14 @@ public static class Program
             WallSeconds = execution.TimedPassWallSeconds,
             ResultCardinality = null,
             ResultDigest = null,
+            ErrorCategory = status == LogicalStatus.Error ? execution.ErrorCategory : null,
+            ErrorMessage = status == LogicalStatus.Error ? execution.ErrorMessage : null,
         };
         ProtocolJson.WriteSingleDocument(Console.Out, result);
         return ProtocolExitCodes.ValidProtocolResult;
     }
 
-    private static string ServingArtifactPath(string requestPath)
+    internal static string ServingArtifactPath(string requestPath)
     {
         string dir = Path.GetDirectoryName(requestPath) ?? ".";
         string name = Path.GetFileNameWithoutExtension(requestPath);

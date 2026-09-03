@@ -23,6 +23,9 @@ public sealed class ServingTimingExecution
     public required IReadOnlyList<ServingTimedSample> Samples { get; init; }
     /// <summary>Diagnostic wall around the complete timed-pass loop; not the per-stratum authority.</summary>
     public double? TimedPassWallSeconds { get; init; }
+    /// <summary>Execution-level diagnostic category: warmup | timed-probe | tail.</summary>
+    public string? ErrorCategory { get; init; }
+    public string? ErrorMessage { get; init; }
 }
 
 /// <summary>
@@ -31,9 +34,11 @@ public sealed class ServingTimingExecution
 /// Per child: measured warmup pass (untimed but correctness-validated) then a
 /// timed pass over the exact same measured sequence; S1 correctness-only Tail
 /// probes run after the timed pass and never produce samples. The timer wraps
-/// only candidate retrieval/materialization; canonicalization/digest and
-/// expected comparison happen after StopSeconds. Samples keep every actual
-/// probe wall (including >= 5.0 s); the child never emits TIMEOUT.
+/// only candidate retrieval/materialization — candidate serving methods already
+/// return fully materialized logical results, so no timed copy/enumeration is
+/// introduced; canonicalization/digest and expected comparison happen after
+/// StopSeconds. Samples keep every actual probe wall (including >= 5.0 s); the
+/// child never emits TIMEOUT.
 /// </summary>
 public sealed class ServingTimingRunner
 {
@@ -67,16 +72,18 @@ public sealed class ServingTimingRunner
         var expected = _workload.Expected;
 
         // Warmup: full correctness over every measured probe (untimed).
-        string warmup = RunWarmup(measured, expected);
-        if (warmup != ServingStatuses.Valid)
+        (string warmupStatus, string? warmupError) = RunWarmup(measured, expected);
+        if (warmupStatus != ServingStatuses.Valid)
         {
             return new ServingTimingExecution
             {
                 Operation = _operation,
                 Repetition = _repetition,
-                Correctness = warmup,
+                Correctness = warmupStatus,
                 Samples = Array.Empty<ServingTimedSample>(),
                 TimedPassWallSeconds = null,
+                ErrorCategory = warmupError is not null ? "warmup" : null,
+                ErrorMessage = warmupError,
             };
         }
 
@@ -84,6 +91,7 @@ public sealed class ServingTimingRunner
         var samples = new List<ServingTimedSample>();
         bool sawInvalid = false;
         bool stoppedByError = false;
+        string? timedError = null;
         var passClock = Stopwatch.StartNew();
         foreach (var probe in measured)
         {
@@ -95,7 +103,7 @@ public sealed class ServingTimingRunner
             string? error = null;
             try
             {
-                materialized = Materialize(probe);
+                materialized = Materialize(probe); // candidate result is already fully materialized
             }
             catch (Exception ex)
             {
@@ -108,6 +116,7 @@ public sealed class ServingTimingRunner
                 samples.Add(new ServingTimedSample(_operation, probe.Seq, probe.Stratum, wall,
                     ServingStatuses.Error, Error: error));
                 stoppedByError = true;
+                timedError = error;
                 break;
             }
 
@@ -122,6 +131,7 @@ public sealed class ServingTimingRunner
                 samples.Add(new ServingTimedSample(_operation, probe.Seq, probe.Stratum, wall,
                     ServingStatuses.Error, Error: ex.Message));
                 stoppedByError = true;
+                timedError = ex.Message;
                 break;
             }
 
@@ -136,29 +146,44 @@ public sealed class ServingTimingRunner
         double? passWall = measured.Count > 0 ? passClock.Elapsed.TotalSeconds : null;
 
         bool tailError = false;
+        string? tailErrorMsg = null;
         // S1 correctness-only Tail runs only after a fully completed measured pass.
         if (!stoppedByError && _operation == "S1")
         {
-            string tail = RunTail(_workload.Probes.Where(p => p.Op == "S1" && !p.Measured), expected);
-            if (tail == ServingStatuses.Error) tailError = true;
-            if (tail == ServingStatuses.Invalid) sawInvalid = true;
+            (string tailStatus, string? tailErr) = RunTail(_workload.Probes.Where(p => p.Op == "S1" && !p.Measured), expected);
+            if (tailStatus == ServingStatuses.Error)
+            {
+                tailError = true;
+                tailErrorMsg = tailErr;
+            }
+            if (tailStatus == ServingStatuses.Invalid) sawInvalid = true;
         }
 
-        string final = stoppedByError || tailError
-            ? ServingStatuses.Error
-            : sawInvalid ? ServingStatuses.Invalid : ServingStatuses.Valid;
+        if (stoppedByError || tailError)
+        {
+            return new ServingTimingExecution
+            {
+                Operation = _operation,
+                Repetition = _repetition,
+                Correctness = ServingStatuses.Error,
+                Samples = samples,
+                TimedPassWallSeconds = passWall,
+                ErrorCategory = stoppedByError ? "timed-probe" : "tail",
+                ErrorMessage = stoppedByError ? timedError : tailErrorMsg,
+            };
+        }
 
         return new ServingTimingExecution
         {
             Operation = _operation,
             Repetition = _repetition,
-            Correctness = final,
+            Correctness = sawInvalid ? ServingStatuses.Invalid : ServingStatuses.Valid,
             Samples = samples,
             TimedPassWallSeconds = passWall,
         };
     }
 
-    private string RunWarmup(IReadOnlyList<ServingProbe> measured, IReadOnlyDictionary<(string, long), ServingExpected> expected)
+    private (string Status, string? Error) RunWarmup(IReadOnlyList<ServingProbe> measured, IReadOnlyDictionary<(string, long), ServingExpected> expected)
     {
         bool invalid = false;
         foreach (var probe in measured)
@@ -169,15 +194,15 @@ public sealed class ServingTimingRunner
                 var (cardinality, digest) = Canonicalize(probe, Materialize(probe));
                 if (cardinality != exp.Cardinality || digest != exp.Digest) invalid = true;
             }
-            catch
+            catch (Exception ex)
             {
-                return ServingStatuses.Error;
+                return (ServingStatuses.Error, ex.Message);
             }
         }
-        return invalid ? ServingStatuses.Invalid : ServingStatuses.Valid;
+        return (invalid ? ServingStatuses.Invalid : ServingStatuses.Valid, null);
     }
 
-    private string RunTail(IEnumerable<ServingProbe> tails, IReadOnlyDictionary<(string, long), ServingExpected> expected)
+    private (string Status, string? Error) RunTail(IEnumerable<ServingProbe> tails, IReadOnlyDictionary<(string, long), ServingExpected> expected)
     {
         bool invalid = false;
         foreach (var probe in tails)
@@ -188,15 +213,18 @@ public sealed class ServingTimingRunner
                 var (cardinality, digest) = Canonicalize(probe, Materialize(probe));
                 if (cardinality != exp.Cardinality || digest != exp.Digest) invalid = true;
             }
-            catch
+            catch (Exception ex)
             {
-                return ServingStatuses.Error;
+                return (ServingStatuses.Error, ex.Message);
             }
         }
-        return invalid ? ServingStatuses.Invalid : ServingStatuses.Valid;
+        return (invalid ? ServingStatuses.Invalid : ServingStatuses.Valid, null);
     }
 
-    /// <summary>Candidate retrieval + full logical materialization only (timed).</summary>
+    /// <summary>
+    /// Candidate retrieval (timed). Serving candidate methods already return
+    /// fully materialized logical results; NO timed copy or enumeration is added.
+    /// </summary>
     private object Materialize(ServingProbe probe)
     {
         switch (probe.Op)
@@ -204,13 +232,13 @@ public sealed class ServingTimingRunner
             case "S1":
                 return _candidate.GetConcept(probe.Qid!.Value);
             case "S2":
-                return _candidate.LookupLexical(probe.Lang!, probe.Value!).ToList();
+                return _candidate.LookupLexical(probe.Lang!, probe.Value!);
             case "S3":
-                return _candidate.GetLexicalByQid(probe.Qid!.Value).ToList();
+                return _candidate.GetLexicalByQid(probe.Qid!.Value);
             case "S4":
-                return _candidate.GetInstanceOf(probe.Qid!.Value).ToList();
+                return _candidate.GetInstanceOf(probe.Qid!.Value);
             case "S5":
-                return _candidate.GetSubclassOf(probe.Qid!.Value).ToList();
+                return _candidate.GetSubclassOf(probe.Qid!.Value);
             default:
                 throw new InvalidOperationException($"unsupported serving op {probe.Op}");
         }
