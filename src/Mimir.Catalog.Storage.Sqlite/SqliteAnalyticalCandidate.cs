@@ -107,7 +107,31 @@ public sealed class SqliteAnalyticalCandidate : IAnalyticalCandidate
         return list;
     }
 
-    public IReadOnlyList<A5Row> A5P31TargetLabels() => throw new NotSupportedException("A5 belongs to a later slice");
+    public IReadOnlyList<A5Row> A5P31TargetLabels()
+    {
+        using var cmd = Require().CreateCommand();
+        cmd.CommandText = """
+            SELECT io.TargetQid,
+                   COUNT(*),
+                   (SELECT le.Value FROM lexical_entry le
+                     WHERE le.Qid = io.TargetQid AND le.Lang = 'en' AND le.LexKind = 'label' LIMIT 1),
+                   (SELECT le.Value FROM lexical_entry le
+                     WHERE le.Qid = io.TargetQid AND le.Lang = 'nb' AND le.LexKind = 'label' LIMIT 1)
+            FROM instance_of io
+            GROUP BY io.TargetQid
+            """;
+        var list = new List<A5Row>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            long target = reader.GetInt64(0);
+            long fanout = reader.GetInt64(1);
+            string? en = reader.IsDBNull(2) ? null : reader.GetString(2);
+            string? nb = reader.IsDBNull(3) ? null : reader.GetString(3);
+            list.Add(new A5Row(target, fanout, en, nb));
+        }
+        return list;
+    }
 
     public void Dispose()
     {
