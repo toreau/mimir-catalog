@@ -12,8 +12,11 @@ repository from here.
 
 - **Pass A (accepted, committed `5f3cc58`)**: corpus-builder foundation and the
   single full-source Pass-A structural evidence run.
-- **Pass B (implemented, uncommitted)**: materializes the frozen benchmark corpus
-  (`T1 ∪ T2`) from the pinned source into relation-split Parquet.
+- **Pass B (accepted, committed `cb01e33`)**: materializes the frozen benchmark
+  corpus (`T1 ∪ T2`) from the pinned source into relation-split Parquet.
+- **Corpus validation (implemented, awaiting senior closeout)**: read-only
+  validation (`validate`) of the published Pass-B corpus plus Phase-0 anchor
+  continuity; verdict GO on the current corpus.
 - The relation-split Parquet is **benchmark interchange only**. It is not a
   production-storage verdict; SQLite/DuckDB/Parquet-direct/hybrid storage
   candidates have not started.
@@ -43,6 +46,9 @@ dotnet run --project src/Mimir.Catalog.CorpusCli -c Release -- passb \
 
 # read-only inspection/validation of a published Pass-B directory
 dotnet run --project src/Mimir.Catalog.CorpusCli -c Release -- inspect --corpus data/corpus/<corpus-id>
+
+# corpus validation + representativeness closeout (uses tracked Phase-0 anchor fixture)
+dotnet run --project src/Mimir.Catalog.CorpusCli -c Release -- validate --corpus data/corpus/<corpus-id>
 ```
 
 Pass-A/Pass-B output lives under `data/` which is gitignored. See `docs/phase1/`.

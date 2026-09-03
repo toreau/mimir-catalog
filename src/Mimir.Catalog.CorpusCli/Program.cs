@@ -19,6 +19,7 @@ public static class Program
                 "fixture" => RunFixture(args),
                 "cid" => Cid(args),
                 "inspect" => RunInspect(args),
+                "validate" => RunValidate(args),
                 _ => Usage(),
             };
         }
@@ -116,6 +117,22 @@ public static class Program
         return allOk ? 0 : 1;
     }
 
+    private static int RunValidate(string[] args)
+    {
+        string corpus = Get(args, "--corpus", Path.Combine("data", "corpus", CorpusIdentity.ComputeId()));
+        string fixture = Get(args, "--fixture", Path.Combine("validation", "phase0-anchors-v1.json"));
+        Console.WriteLine($"validation start: corpus={corpus} fixture={fixture}");
+        string verdict = CorpusValidation.Run(corpus, fixture, out var evidence);
+        Console.WriteLine($"verdict={verdict}");
+        Console.WriteLine($"concept rows={evidence.ConceptRows} unique={evidence.UniqueConcepts}");
+        Console.WriteLine($"tiers: T1={evidence.T1Concepts} T2={evidence.T2Concepts} cap={evidence.T1IntersectT2} t2Only={evidence.T2OnlyConcepts}");
+        Console.WriteLine($"tail={evidence.TailCount} tailHashQualified={evidence.TailHashQualified} qids={string.Join(",", evidence.TailHashQualifiedQids)}");
+        Console.WriteLine($"lexical={evidence.LexicalRows} instance={evidence.InstanceOfRows} subclass={evidence.SubclassOfRows}");
+        Console.WriteLine($"failedGates={evidence.FailedGates.Count}");
+        foreach (var f in evidence.FailedGates) Console.WriteLine($"  FAIL: {f}");
+        return verdict == CorpusValidation.GO ? 0 : 1;
+    }
+
     private static int Cid(string[] args)
     {
         Console.WriteLine(CorpusIdentity.ComputeId());
@@ -130,7 +147,8 @@ public static class Program
             "  passb  --source <path> --corpus <corpus-root>\n" +
             "  fixture --source <path>\n" +
             "  cid\n" +
-            "  inspect --corpus <corpus-root>");
+            "  inspect --corpus <corpus-root>\n" +
+            "  validate --corpus <corpus-root> [--fixture <path>]");
         return 2;
     }
 
