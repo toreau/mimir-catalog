@@ -198,23 +198,45 @@ public class ResourceClassificationTests : IDisposable
     }
 }
 
-public class CapabilityProbeTests : IDisposable
+public class CapabilityProbeTests
 {
-    private readonly string _dir = Path.Combine(Path.GetTempPath(), "mimir-cap-" + Guid.NewGuid().ToString("N"));
-    public CapabilityProbeTests() => Directory.CreateDirectory(_dir);
-    public void Dispose() { try { Directory.Delete(_dir, true); } catch { } }
+    private static CapabilityProbeResult Run(bool isMac, ProbeExecutionResult r) => MacOsTimeCapabilityProbe.RunForTest(isMac, () => r);
 
-    private string Write(string content)
+    [Fact]
+    public void NonMacOs_DoesNotSpawn()
     {
-        string p = Path.Combine(_dir, "probe-" + Guid.NewGuid().ToString("N") + ".txt");
-        File.WriteAllText(p, content);
-        return p;
+        var called = false;
+        var r = MacOsTimeCapabilityProbe.RunForTest(
+            isMacOs: false,
+            () => { called = true; throw new InvalidOperationException("must not be called"); });
+        Assert.False(r.Supported);
+        Assert.Contains("not macOS", r.Reason);
+        Assert.False(called);
+    }
+
+    [Fact]
+    public void LaunchFailure_ThrownExecutor_Fails()
+    {
+        var r = MacOsTimeCapabilityProbe.RunForTest(
+            isMacOs: true,
+            () => throw new InvalidOperationException("spawn refused"));
+        Assert.False(r.Supported);
+        Assert.Contains("launch failure", r.Reason);
+    }
+
+    [Fact]
+    public void LaunchFailure_ExplicitFlag_Fails()
+    {
+        var r = Run(true, new ProbeExecutionResult(false, -1, "", "", null, "cannot exec"));
+        Assert.False(r.Supported);
+        Assert.Contains("launch failure", r.Reason);
+        Assert.Contains("cannot exec", r.Reason);
     }
 
     [Fact]
     public void ProbeExitNonzero_Fails()
     {
-        var r = MacOsTimeCapabilityProbe.Classify(3, Write("0 maximum resident set size"), "", "boom");
+        var r = Run(true, new ProbeExecutionResult(true, 3, "", "boom", "0 maximum resident set size\n", null));
         Assert.False(r.Supported);
         Assert.Contains("probe exit code 3", r.Reason);
     }
@@ -222,7 +244,7 @@ public class CapabilityProbeTests : IDisposable
     [Fact]
     public void ProbeMissingOutput_Fails()
     {
-        var r = MacOsTimeCapabilityProbe.Classify(0, Path.Combine(_dir, "absent.txt"), "", "");
+        var r = Run(true, new ProbeExecutionResult(true, 0, "", "", null, null));
         Assert.False(r.Supported);
         Assert.Contains("no -o output", r.Reason);
     }
@@ -230,16 +252,23 @@ public class CapabilityProbeTests : IDisposable
     [Fact]
     public void ProbeMalformedOutput_Fails()
     {
-        var r = MacOsTimeCapabilityProbe.Classify(0, Write("peak memory footprint"), "", "");
+        var r = Run(true, new ProbeExecutionResult(true, 0, "", "", "peak memory footprint", null));
         Assert.False(r.Supported);
         Assert.Contains("RSS parse failed", r.Reason);
     }
 
     [Fact]
-    public void ProbeValidOutput_Pass_RetainsRawBytes()
+    public void ValidExecutionPath_Pass_RetainsRawBytes()
     {
-        var r = MacOsTimeCapabilityProbe.Classify(0, Write("424242  maximum resident set size\n"), "", "");
+        var r = Run(true, new ProbeExecutionResult(true, 0, "", "", "424242  maximum resident set size\n", null));
         Assert.True(r.Supported);
         Assert.Equal(424242L, r.RssBytes);
+    }
+
+    [Fact]
+    public void ProbeInvocationShape_IsExact()
+    {
+        Assert.Equal(new[] { "-l", "-o", "/tmp/r.txt", "/usr/bin/true" },
+            MacOsTimeCapabilityProbe.BuildProbeArguments("/tmp/r.txt"));
     }
 }
