@@ -236,12 +236,14 @@ public class EvidenceFinalizationTests : IDisposable
     }
 
     [Fact]
-    public void StagingRootReplacedBySymlink_Blocks()
+    public void StagingRootReplacedBySymlink_Blocks_NoDiagnosticWriteThroughLink()
     {
         using var s = EvidenceStagingSession.Create(_root, Identity());
         s.WriteText("a.json", "x");
         string outside = Path.Combine(_root, "outside-root");
         Directory.CreateDirectory(outside);
+        string sentinel = Path.Combine(outside, "sentinel.txt");
+        File.WriteAllText(sentinel, "sentinel-unchanged");
         Directory.Delete(s.StagingPath, recursive: true);
         try
         {
@@ -254,6 +256,9 @@ public class EvidenceFinalizationTests : IDisposable
         var r = EvidenceFinalizer.Finalize(s);
         Assert.Equal(EvidenceFinalizationStatus.Failed, r.Status);
         Assert.Contains(r.Problems, p => p.Contains("finalize:tree") && p.Contains("symlink"));
+        Assert.Contains(r.Problems, p => p.Contains("Failed state not written because staging root is unsafe/unavailable"));
+        Assert.Equal("sentinel-unchanged", File.ReadAllText(sentinel));
+        Assert.False(File.Exists(Path.Combine(outside, "run.state.json")));
     }
 
     [Fact]
@@ -290,5 +295,73 @@ public class EvidenceFinalizationTests : IDisposable
         Assert.Equal(EvidenceFinalizationStatus.Failed, r2.Status);
         Assert.Equal(runBefore, File.ReadAllBytes(Path.Combine(s.StagingPath, "run.json")));
         Assert.True(File.Exists(Path.Combine(s.StagingPath, "evidence.manifest.json")));
+    }
+    [Fact]
+    public void RunJsonMutation_AtFinalCheckpoint_Failed()
+    {
+        using var s = EvidenceStagingSession.Create(_root, Identity());
+        s.WriteText("a.json", "x");
+        var r = EvidenceFinalizer.FinalizeForTest(s, cp =>
+        {
+            if (cp == EvidenceFinalizer.EvidenceFinalizeCheckpoint.BeforeFinalControlVerification)
+            {
+                var id = s.Identity;
+                var mutated = new EvidenceRunJson(id.EvidenceSchemaVersion, id.ProtocolVersion,
+                    "other-candidate", id.CandidateConfigId, id.WorkloadId, id.CorpusId, id.RunId);
+                File.WriteAllBytes(Path.Combine(s.StagingPath, "run.json"), EvidenceJson.SerializeRunJson(mutated));
+            }
+        });
+        Assert.Equal(EvidenceFinalizationStatus.Failed, r.Status);
+        Assert.DoesNotContain(r.Problems, p => p == "");
+    }
+
+    [Fact]
+    public void ManifestMutation_AtFinalCheckpoint_Failed()
+    {
+        using var s = EvidenceStagingSession.Create(_root, Identity());
+        s.WriteText("a.json", "x");
+        var r = EvidenceFinalizer.FinalizeForTest(s, cp =>
+        {
+            if (cp == EvidenceFinalizer.EvidenceFinalizeCheckpoint.BeforeFinalControlVerification)
+            {
+                string mpath = Path.Combine(s.StagingPath, "evidence.manifest.json");
+                var parsed = EvidenceJson.ReadManifest(File.ReadAllBytes(mpath));
+                var tampered = parsed with { Artifacts = parsed.Artifacts
+                    .Select(a => a.RelativePath == "run.json" ? a : a with { Sha256 = a.Sha256 == "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                        ? a.Sha256 : "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }).ToList() };
+                File.WriteAllBytes(mpath, EvidenceJson.SerializeManifest(tampered));
+            }
+        });
+        Assert.Equal(EvidenceFinalizationStatus.Failed, r.Status);
+    }
+
+    [Fact]
+    public void OperationalFault_HookThrows_ReturnsFailed_StateWrittenWhenRootSafe()
+    {
+        using var s = EvidenceStagingSession.Create(_root, Identity());
+        s.WriteText("a.json", "x");
+        var r = EvidenceFinalizer.FinalizeForTest(s, cp =>
+        {
+            if (cp == EvidenceFinalizer.EvidenceFinalizeCheckpoint.BeforeFinalControlVerification)
+                throw new IOException("injected operational fault");
+        });
+        Assert.Equal(EvidenceFinalizationStatus.Failed, r.Status);
+        Assert.Contains(r.Problems, p => p.Contains("finalize:internal"));
+        Assert.True(Directory.Exists(s.StagingPath));
+        Assert.False(Directory.Exists(s.FinalPath));
+        Assert.Contains("\"state\":\"Failed\"", File.ReadAllText(Path.Combine(s.StagingPath, "run.state.json")));
+    }
+
+    [Fact]
+    public void FinalResult_ManifestBytesAndShaMatchFreshDisk()
+    {
+        using var s = EvidenceStagingSession.Create(_root, Identity());
+        s.WriteText("a.json", "payload");
+        var r = EvidenceFinalizer.Finalize(s);
+        Assert.Equal(EvidenceFinalizationStatus.ReadyForPromotion, r.Status);
+        byte[] onDisk = File.ReadAllBytes(Path.Combine(s.StagingPath, "evidence.manifest.json"));
+        Assert.Equal(onDisk, r.ManifestBytes);
+        using var sha = System.Security.Cryptography.SHA256.Create();
+        Assert.Equal(Convert.ToHexStringLower(sha.ComputeHash(onDisk)), r.ManifestSha256);
     }
 }

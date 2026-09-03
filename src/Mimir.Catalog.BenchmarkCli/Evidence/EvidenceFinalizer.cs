@@ -33,27 +33,70 @@ internal sealed class FinalizeStageException : Exception
 public static class EvidenceFinalizer
 {
     public static EvidenceFinalizationResult Finalize(EvidenceStagingSession session)
+        => FinalizeCore(session, hook: null);
+
+    internal static EvidenceFinalizationResult FinalizeForTest(
+        EvidenceStagingSession session,
+        Action<EvidenceFinalizeCheckpoint> hook)
+        => FinalizeCore(session, hook);
+
+    internal enum EvidenceFinalizeCheckpoint
+    {
+        BeforeFinalControlVerification,
+    }
+
+    private static EvidenceFinalizationResult FinalizeCore(
+        EvidenceStagingSession session,
+        Action<EvidenceFinalizeCheckpoint>? hook)
     {
         var problems = new List<string>();
         try
         {
-            return RunFinalization(session);
+            return RunFinalization(session, hook);
         }
         catch (FinalizeStageException ex)
         {
             problems.Add($"{ex.Stage}: {ex.Message}");
-            problems.AddRange(session.Fail(ex.Stage, Sanitize(ex.Message)));
-            return new EvidenceFinalizationResult
-            {
-                Status = EvidenceFinalizationStatus.Failed,
-                StagingPath = session.StagingPath,
-                FinalPath = session.FinalPath,
-                Problems = problems,
-            };
+            problems.AddRange(TrySafeFail(session, ex.Stage, ex.Message));
+            return FailedResult(session, problems);
+        }
+        catch (Exception ex)
+        {
+            problems.Add($"finalize:internal: {ex.Message}");
+            problems.AddRange(TrySafeFail(session, "finalize:internal", ex.Message));
+            return FailedResult(session, problems);
         }
     }
 
-    private static EvidenceFinalizationResult RunFinalization(EvidenceStagingSession session)
+    private static EvidenceFinalizationResult FailedResult(EvidenceStagingSession session, List<string> problems)
+        => new()
+        {
+            Status = EvidenceFinalizationStatus.Failed,
+            StagingPath = session.StagingPath,
+            FinalPath = session.FinalPath,
+            Problems = problems,
+        };
+
+    private static IReadOnlyList<string> TrySafeFail(EvidenceStagingSession session, string stage, string reason)
+    {
+        if (!StagingRootSafe(session.StagingPath))
+            return new[] { $"Failed state not written because staging root is unsafe/unavailable ({stage})" };
+        return session.Fail(stage, Sanitize(reason));
+    }
+
+    private static bool StagingRootSafe(string path)
+    {
+        try
+        {
+            return Directory.Exists(path) && !File.Exists(path) && !EvidenceTreeInspector.IsSymlinkOrReparse(path);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static EvidenceFinalizationResult RunFinalization(EvidenceStagingSession session, Action<EvidenceFinalizeCheckpoint>? hook)
     {
         string staging = session.StagingPath;
         string final = session.FinalPath;
@@ -140,20 +183,65 @@ public static class EvidenceFinalizer
         // 15. every manifest entry matches actual current bytes/hash
         VerifyManifestEntriesAgainstDisk(session, manifestParsed, runOnDisk, runSha, finalTree);
 
-        // 16. final destination recheck
+        // 16. deterministic test checkpoint before the authoritative fresh reread
+        hook?.Invoke(EvidenceFinalizeCheckpoint.BeforeFinalControlVerification);
+
+        // 17. authoritative final fresh reread of both immutable control files
+        byte[] runFresh = ReadControlBytes(staging, EvidenceStagingSession.RunJsonName, "finalize:strict-validate");
+        byte[] manifestFresh = ReadControlBytes(staging, EvidenceStagingSession.ManifestName, "finalize:strict-validate");
+        EvidenceRunJson runParsedFresh;
+        EvidenceManifest manifestParsedFresh;
+        try
+        {
+            runParsedFresh = EvidenceJson.ReadRunJson(runFresh);
+            manifestParsedFresh = EvidenceJson.ReadManifest(manifestFresh);
+        }
+        catch (Exception ex)
+        {
+            throw new FinalizeStageException("finalize:strict-validate", ex.Message);
+        }
+        ValidateRunIdentity(identity, runParsedFresh, manifestParsedFresh);
+        ValidateManifestSemantics(session, manifestParsedFresh, manifestFresh.Length, "");
+
+        // run.json manifest entry must match the FRESH disk bytes
+        string runShaFresh = EvidenceControlWriter.Sha256(runFresh);
+        var runFreshEntry = manifestParsedFresh.Artifacts.Single(x => x.RelativePath == EvidenceStagingSession.RunJsonName);
+        if (runFreshEntry.Bytes != runFresh.Length || runFreshEntry.Sha256 != runShaFresh)
+            throw new FinalizeStageException("finalize:strict-validate", "run.json manifest entry no longer matches fresh disk bytes");
+
+        // every registered artifact re-checked against fresh disk state
+        var freshProblems = session.VerifyRegisteredArtifacts();
+        if (freshProblems.Count > 0)
+            throw new FinalizeStageException("finalize:registered", string.Join("; ", freshProblems));
+
+        // 18. final destination recheck
         EnsureFinalAbsent(final, "finalize:final-destination");
 
-        // 17. ReadyForPromotion (in memory only; state remains Running)
+        // ReadyForPromotion (in memory only; state remains Running). Manifest
+        // bytes/SHA are computed from the fresh final manifest bytes.
+        string manifestShaFinal = EvidenceControlWriter.Sha256(manifestFresh);
         return new EvidenceFinalizationResult
         {
             Status = EvidenceFinalizationStatus.ReadyForPromotion,
             StagingPath = staging,
             FinalPath = final,
-            RunJson = runParsed,
-            ManifestBytes = manifestOnDisk,
-            ManifestSha256 = manifestSha,
+            RunJson = runParsedFresh,
+            ManifestBytes = manifestFresh,
+            ManifestSha256 = manifestShaFinal,
             Problems = Array.Empty<string>(),
         };
+    }
+
+    private static byte[] ReadControlBytes(string staging, string name, string stage)
+    {
+        try
+        {
+            return File.ReadAllBytes(Path.Combine(staging, name));
+        }
+        catch (Exception ex)
+        {
+            throw new FinalizeStageException(stage, $"failed to reread {name}: {ex.Message}");
+        }
     }
 
     private static EvidenceRunJson ToRunJson(RunIdentity id) => new(
