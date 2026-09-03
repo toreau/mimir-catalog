@@ -4,5 +4,11 @@ data/
 *.sqlite
 *.sqlite-*
 *.duckdb
+!src/Mimir.Catalog.Storage.Sqlite/
+!src/Mimir.Catalog.Storage.Sqlite/**
+src/Mimir.Catalog.Storage.Sqlite/bin/
+src/Mimir.Catalog.Storage.Sqlite/bin/**
+src/Mimir.Catalog.Storage.Sqlite/obj/
+src/Mimir.Catalog.Storage.Sqlite/obj/**
 *.parquet
 nohup.out

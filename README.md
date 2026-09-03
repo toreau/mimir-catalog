@@ -23,10 +23,11 @@ repository from here.
   (`gen-workload`). Authoritative workload-v1 generation is GO and
   published (`data/benchmarks/<corpus-id>/workload-v1`); S2 Fanout51Plus is a
   380-key census (`fanout >= 51`). Evidence: `docs/phase1/1.1a.3-closeout.md`.
-  Storage candidates have not started.
+  SQLite Candidate A foundation in progress (Phase 1.1A.4a); no
+  storage-candidate benchmark has been executed.
 - The relation-split Parquet is **benchmark interchange only**. It is not a
   production-storage verdict; SQLite/DuckDB/Parquet-direct/hybrid storage
-  candidates have not started.
+  candidates have not been benchmarked.
 
 ## Layout
 
@@ -34,6 +35,11 @@ repository from here.
   Wikidata parser with Phase-0 semantic equivalence, Pass-A/Pass-B implementation.
 - `Mimir.Catalog.CorpusCli`: CLI.
 - `Mimir.Catalog.Corpus.Tests`: deterministic local tests (no full source scan).
+- `Mimir.Catalog.Workload`: candidate-neutral workload contract, generator and
+  expected-result oracle (1.1A.3, accepted).
+- `Mimir.Catalog.Benchmark`: candidate-neutral storage adapter surface.
+- `Mimir.Catalog.Storage.Sqlite`: Candidate A frozen baseline config/schema
+  (1.1A.4a).
 
 ## Commands
 

@@ -1,0 +1,70 @@
+{
+  "schema": "mimir-catalog-candidate-a-sqlite-v1",
+  "schemaVersion": 1,
+  "providerName": "Microsoft.Data.Sqlite",
+  "providerVersion": "10.0.11",
+  "corpusId": "511adb9ebd066f1d4d344b80171902d5",
+  "workloadId": "cc85bd20801b8239fa5f4374588d83ff5b5cb7ec482bbccd3e7fb03d283513fc",
+  "buildPragmas": {
+    "page_size": 4096,
+    "journal_mode": "OFF",
+    "synchronous": "OFF",
+    "foreign_keys": "OFF",
+    "automatic_index": "OFF",
+    "temp_store": "DEFAULT"
+  },
+  "readPragmas": {
+    "foreign_keys": "OFF",
+    "automatic_index": "OFF"
+  },
+  "analyzePolicy": "none",
+  "vacuumPolicy": "none",
+  "optimizePolicy": "none",
+  "tables": [
+    {
+      "name": "concept",
+      "organization": "rowid-primary-key",
+      "strict": true,
+      "columns": [
+        { "name": "Qid", "type": "INTEGER", "notNull": true, "primaryKey": true },
+        { "name": "InT1", "type": "INTEGER", "notNull": true },
+        { "name": "InT2", "type": "INTEGER", "notNull": true }
+      ]
+    },
+    {
+      "name": "lexical_entry",
+      "organization": "rowid",
+      "strict": true,
+      "columns": [
+        { "name": "Qid", "type": "INTEGER", "notNull": true },
+        { "name": "Lang", "type": "TEXT", "notNull": true, "collation": "BINARY" },
+        { "name": "LexKind", "type": "TEXT", "notNull": true, "collation": "BINARY" },
+        { "name": "Value", "type": "TEXT", "notNull": true, "collation": "BINARY" }
+      ]
+    },
+    {
+      "name": "instance_of",
+      "organization": "rowid",
+      "strict": true,
+      "columns": [
+        { "name": "SubjectQid", "type": "INTEGER", "notNull": true },
+        { "name": "TargetQid", "type": "INTEGER", "notNull": true }
+      ]
+    },
+    {
+      "name": "subclass_of",
+      "organization": "rowid",
+      "strict": true,
+      "columns": [
+        { "name": "SubjectQid", "type": "INTEGER", "notNull": true },
+        { "name": "TargetQid", "type": "INTEGER", "notNull": true }
+      ]
+    }
+  ],
+  "indexes": [
+    { "name": "lex_lang_value", "table": "lexical_entry", "columns": ["Lang COLLATE BINARY", "Value COLLATE BINARY"] },
+    { "name": "lex_qid", "table": "lexical_entry", "columns": ["Qid", "Lang COLLATE BINARY", "LexKind COLLATE BINARY"] },
+    { "name": "inst_subject", "table": "instance_of", "columns": ["SubjectQid", "TargetQid"] },
+    { "name": "sub_subject", "table": "subclass_of", "columns": ["SubjectQid", "TargetQid"] }
+  ]
+}
