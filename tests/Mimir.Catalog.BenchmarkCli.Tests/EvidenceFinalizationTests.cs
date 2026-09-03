@@ -364,4 +364,93 @@ public class EvidenceFinalizationTests : IDisposable
         using var sha = System.Security.Cryptography.SHA256.Create();
         Assert.Equal(Convert.ToHexStringLower(sha.ComputeHash(onDisk)), r.ManifestSha256);
     }
+    [Fact]
+    public void LateUnexpectedFile_AfterCheckpoint_Failed()
+    {
+        using var s = EvidenceStagingSession.Create(_root, Identity());
+        s.WriteText("a.json", "x");
+        var r = EvidenceFinalizer.FinalizeForTest(s, cp =>
+        {
+            if (cp == EvidenceFinalizer.EvidenceFinalizeCheckpoint.BeforeFinalControlVerification)
+                File.WriteAllText(Path.Combine(s.StagingPath, "late-stray.bin"), "junk");
+        });
+        Assert.Equal(EvidenceFinalizationStatus.Failed, r.Status);
+        Assert.Contains(r.Problems, p => p.Contains("late-stray.bin"));
+    }
+
+    [Fact]
+    public void LateUnexpectedDirectory_AfterCheckpoint_Failed()
+    {
+        using var s = EvidenceStagingSession.Create(_root, Identity());
+        s.WriteText("a.json", "x");
+        var r = EvidenceFinalizer.FinalizeForTest(s, cp =>
+        {
+            if (cp == EvidenceFinalizer.EvidenceFinalizeCheckpoint.BeforeFinalControlVerification)
+                Directory.CreateDirectory(Path.Combine(s.StagingPath, "orphan-late"));
+        });
+        Assert.Equal(EvidenceFinalizationStatus.Failed, r.Status);
+        Assert.Contains(r.Problems, p => p.Contains("orphan-late"));
+    }
+
+    [Fact]
+    public void LateSymlink_AfterCheckpoint_Failed_NoWriteThrough()
+    {
+        using var s = EvidenceStagingSession.Create(_root, Identity());
+        s.WriteText("a.json", "x");
+        string outsideTarget = Path.Combine(_root, "late-target.txt");
+        File.WriteAllText(outsideTarget, "target-unchanged");
+        var r = EvidenceFinalizer.FinalizeForTest(s, cp =>
+        {
+            if (cp == EvidenceFinalizer.EvidenceFinalizeCheckpoint.BeforeFinalControlVerification)
+            {
+                try
+                {
+                    File.CreateSymbolicLink(Path.Combine(s.StagingPath, "late-link.txt"), outsideTarget);
+                }
+                catch (Exception)
+                {
+                    // platform without symlink support
+                }
+            }
+        });
+        if (File.Exists(Path.Combine(s.StagingPath, "late-link.txt")))
+        {
+            Assert.Equal(EvidenceFinalizationStatus.Failed, r.Status);
+            Assert.Contains(r.Problems, p => p.Contains("finalize:tree"));
+            Assert.Equal("target-unchanged", File.ReadAllText(outsideTarget));
+        }
+    }
+
+    [Fact]
+    public void LateStateMutation_ToFailed_Blocks()
+    {
+        using var s = EvidenceStagingSession.Create(_root, Identity());
+        s.WriteText("a.json", "x");
+        var r = EvidenceFinalizer.FinalizeForTest(s, cp =>
+        {
+            if (cp == EvidenceFinalizer.EvidenceFinalizeCheckpoint.BeforeFinalControlVerification)
+            {
+                string mutated = "{\"state\":\"Failed\",\"run_id\":\"" + s.Identity.RunId +
+                    "\",\"candidate_id\":\"" + s.Identity.CandidateId + "\"}\n";
+                File.WriteAllText(Path.Combine(s.StagingPath, "run.state.json"), mutated);
+            }
+        });
+        Assert.Equal(EvidenceFinalizationStatus.Failed, r.Status);
+        Assert.Contains(r.Problems, p => p.Contains("finalize:state") && p.Contains("Running"));
+    }
+
+    [Fact]
+    public void Success_FinalGate_RunningState_ManifestMatchesFreshDisk()
+    {
+        using var s = EvidenceStagingSession.Create(_root, Identity());
+        s.WriteText("a.json", "payload");
+        var r = EvidenceFinalizer.Finalize(s);
+        Assert.Equal(EvidenceFinalizationStatus.ReadyForPromotion, r.Status);
+        string stateText = File.ReadAllText(Path.Combine(s.StagingPath, "run.state.json"));
+        Assert.Contains("\"state\":\"Running\"", stateText);
+        byte[] onDisk = File.ReadAllBytes(Path.Combine(s.StagingPath, "evidence.manifest.json"));
+        Assert.Equal(onDisk, r.ManifestBytes);
+        using var sha = System.Security.Cryptography.SHA256.Create();
+        Assert.Equal(Convert.ToHexStringLower(sha.ComputeHash(onDisk)), r.ManifestSha256);
+    }
 }

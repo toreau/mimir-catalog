@@ -375,12 +375,32 @@ public sealed class EvidenceStagingSession : IDisposable
         string tmp = Path.Combine(staging, TempStatePrefix + Guid.NewGuid().ToString("N") + ".json");
         try
         {
-            File.WriteAllText(tmp, JsonSerializer.Serialize(state, JsonOptions), new UTF8Encoding(false));
+            byte[] payload = SerializeState(state);
+            File.WriteAllBytes(tmp, payload);
             File.Move(tmp, target, overwrite: true);
         }
         finally
         {
             try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
         }
+    }
+
+    /// <summary>Snake_case state serialization matching the frozen state contract.</summary>
+    private static byte[] SerializeState(RunEvidenceState state)
+    {
+        using var ms = new MemoryStream();
+        using (var w = new System.Text.Json.Utf8JsonWriter(ms))
+        {
+            w.WriteStartObject();
+            w.WriteString("state", state.State);
+            w.WriteString("run_id", state.RunId);
+            w.WriteString("candidate_id", state.CandidateId);
+            if (state.Stage is not null) w.WriteString("stage", state.Stage);
+            if (state.Reason is not null) w.WriteString("reason", state.Reason);
+            if (state.Utc is { } utc) w.WriteString("utc", utc.ToString("O"));
+            w.WriteEndObject();
+        }
+        ms.WriteByte(0x0A);
+        return ms.ToArray();
     }
 }
