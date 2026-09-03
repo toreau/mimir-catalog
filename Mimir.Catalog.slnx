@@ -5,11 +5,13 @@
     <Project Path="src/Mimir.Catalog.Workload/Mimir.Catalog.Workload.csproj" />
     <Project Path="src/Mimir.Catalog.Benchmark/Mimir.Catalog.Benchmark.csproj" />
     <Project Path="src/Mimir.Catalog.Storage.Sqlite/Mimir.Catalog.Storage.Sqlite.csproj" />
+    <Project Path="src/Mimir.Catalog.BenchmarkCli/Mimir.Catalog.BenchmarkCli.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Mimir.Catalog.Corpus.Tests/Mimir.Catalog.Corpus.Tests.csproj" />
     <Project Path="tests/Mimir.Catalog.Workload.Tests/Mimir.Catalog.Workload.Tests.csproj" />
     <Project Path="tests/Mimir.Catalog.Benchmark.Tests/Mimir.Catalog.Benchmark.Tests.csproj" />
     <Project Path="tests/Mimir.Catalog.Storage.Sqlite.Tests/Mimir.Catalog.Storage.Sqlite.Tests.csproj" />
+    <Project Path="tests/Mimir.Catalog.BenchmarkCli.Tests/Mimir.Catalog.BenchmarkCli.Tests.csproj" />
   </Folder>
 </Solution>
