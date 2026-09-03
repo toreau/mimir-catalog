@@ -1,6 +1,5 @@
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json;
 
 namespace Mimir.Catalog.BenchmarkCli.Evidence;
 
@@ -22,8 +21,6 @@ public sealed class EvidenceStagingSession : IDisposable
     public const string RunJsonName = "run.json";
     public const string ManifestName = "evidence.manifest.json";
     private const string TempStatePrefix = ".state-tmp-";
-
-    private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
     private static readonly HashSet<string> ReservedTopLevel = new(StringComparer.Ordinal)
     {
@@ -59,6 +56,8 @@ public sealed class EvidenceStagingSession : IDisposable
             throw new EvidenceStagingException($"staging path already exists and is never reused: {layout.StagingPath}");
 
         Directory.CreateDirectory(layout.CandidateRoot);
+        if (IsReparseOrSymlink(layout.CandidateRoot))
+            throw new EvidenceStagingException($"candidate root is a symlink/reparse point; refusing session creation: {layout.CandidateRoot}");
         try
         {
             Directory.CreateDirectory(layout.StagingPath);
@@ -369,13 +368,24 @@ public sealed class EvidenceStagingSession : IDisposable
         return Convert.ToHexStringLower(sha.ComputeHash(fs));
     }
 
+    /// <summary>Evidence-owned atomic Complete write used only by promotion.</summary>
+    internal void WriteCompleteState()
+        => WriteStateAtomic(StagingPath, new RunEvidenceState
+        {
+            State = "Complete",
+            RunId = Identity.RunId,
+            CandidateId = Identity.CandidateId,
+            Stage = "promote",
+            Utc = DateTime.UtcNow,
+        });
+
     private static void WriteStateAtomic(string staging, RunEvidenceState state)
     {
         string target = Path.Combine(staging, StateFileName);
         string tmp = Path.Combine(staging, TempStatePrefix + Guid.NewGuid().ToString("N") + ".json");
         try
         {
-            byte[] payload = SerializeState(state);
+            byte[] payload = EvidenceState.Serialize(state.State, state.RunId, state.CandidateId, state.Stage, state.Reason, state.Utc);
             File.WriteAllBytes(tmp, payload);
             File.Move(tmp, target, overwrite: true);
         }
@@ -383,24 +393,5 @@ public sealed class EvidenceStagingSession : IDisposable
         {
             try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
         }
-    }
-
-    /// <summary>Snake_case state serialization matching the frozen state contract.</summary>
-    private static byte[] SerializeState(RunEvidenceState state)
-    {
-        using var ms = new MemoryStream();
-        using (var w = new System.Text.Json.Utf8JsonWriter(ms))
-        {
-            w.WriteStartObject();
-            w.WriteString("state", state.State);
-            w.WriteString("run_id", state.RunId);
-            w.WriteString("candidate_id", state.CandidateId);
-            if (state.Stage is not null) w.WriteString("stage", state.Stage);
-            if (state.Reason is not null) w.WriteString("reason", state.Reason);
-            if (state.Utc is { } utc) w.WriteString("utc", utc.ToString("O"));
-            w.WriteEndObject();
-        }
-        ms.WriteByte(0x0A);
-        return ms.ToArray();
     }
 }
