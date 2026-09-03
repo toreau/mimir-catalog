@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace Mimir.Catalog.BenchmarkCli.Evidence;
 
 /// <summary>Frozen evidence schema identifier (v1).</summary>
@@ -45,11 +47,17 @@ public sealed record EvidenceArtifactEntry(string RelativePath, long Bytes, stri
 /// <summary>Operational run state persisted to run.state.json.</summary>
 public sealed class RunEvidenceState
 {
+    [JsonPropertyName("state")]
     public required string State { get; set; }
+    [JsonPropertyName("run_id")]
     public required string RunId { get; init; }
+    [JsonPropertyName("candidate_id")]
     public required string CandidateId { get; init; }
+    [JsonPropertyName("stage")]
     public string? Stage { get; set; }
+    [JsonPropertyName("reason")]
     public string? Reason { get; set; }
+    [JsonPropertyName("utc")]
     public DateTime? Utc { get; set; }
 }
 
