@@ -5,12 +5,16 @@ namespace Mimir.Catalog.BenchmarkCli.Evidence;
 /// <summary>
 /// Portable safe-component and artifact relative-path rules. Artifact relative
 /// paths are canonical with '/' separators; native mapping splits on '/'.
+/// Native filesystem equality is OS-appropriate (Ordinal on Unix, OrdinalIgnoreCase on Windows).
 /// </summary>
 public static partial class EvidencePathSafety
 {
     /// <summary>^[A-Za-z0-9][A-Za-z0-9._-]*$ — no leading dot, no separators.</summary>
     [GeneratedRegex("^[A-Za-z0-9][A-Za-z0-9._-]*$", RegexOptions.CultureInvariant)]
     private static partial Regex SafeComponentRegex();
+
+    public static StringComparison NativeComparison
+        => OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
 
     public static bool IsValidComponent(string component)
         => !string.IsNullOrEmpty(component) && SafeComponentRegex().IsMatch(component);
@@ -69,6 +73,9 @@ public static partial class EvidencePathSafety
         return true;
     }
 
+    public static bool IsSamePath(string a, string b)
+        => string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), NativeComparison);
+
     /// <summary>Resolves a canonical relative path beneath a root with a real path-boundary check.</summary>
     public static string ResolveUnderRoot(string root, string canonicalRelative)
     {
@@ -76,7 +83,7 @@ public static partial class EvidencePathSafety
         string combined = Path.Combine(new[] { rootFull }.Concat(canonicalRelative.Split('/')).ToArray());
         string full = Path.GetFullPath(combined);
         string boundary = rootFull.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-        if (!full.StartsWith(boundary, StringComparison.Ordinal))
+        if (!full.StartsWith(boundary, NativeComparison))
             throw new EvidenceStagingException($"artifact path escapes staging root: {canonicalRelative}");
         return full;
     }

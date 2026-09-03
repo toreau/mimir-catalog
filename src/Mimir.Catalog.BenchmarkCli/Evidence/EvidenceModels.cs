@@ -12,13 +12,13 @@ public static class EvidenceSchema
 /// </summary>
 public sealed class RunIdentity
 {
-    public required string EvidenceSchemaVersion { get; set; }
-    public required string ProtocolVersion { get; set; }
-    public required string CandidateId { get; set; }
-    public required string CandidateConfigId { get; set; }
-    public required string WorkloadId { get; set; }
-    public required string CorpusId { get; set; }
-    public required string RunId { get; set; }
+    public required string EvidenceSchemaVersion { get; init; }
+    public required string ProtocolVersion { get; init; }
+    public required string CandidateId { get; init; }
+    public required string CandidateConfigId { get; init; }
+    public required string WorkloadId { get; init; }
+    public required string CorpusId { get; init; }
+    public required string RunId { get; init; }
 
     public IReadOnlyList<string> Validate()
     {
@@ -46,8 +46,8 @@ public sealed record EvidenceArtifactEntry(string RelativePath, long Bytes, stri
 public sealed class RunEvidenceState
 {
     public required string State { get; set; }
-    public required string RunId { get; set; }
-    public required string CandidateId { get; set; }
+    public required string RunId { get; init; }
+    public required string CandidateId { get; init; }
     public string? Stage { get; set; }
     public string? Reason { get; set; }
     public DateTime? Utc { get; set; }

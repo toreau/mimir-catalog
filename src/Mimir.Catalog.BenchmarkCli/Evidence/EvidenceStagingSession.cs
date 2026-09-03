@@ -9,6 +9,12 @@ namespace Mimir.Catalog.BenchmarkCli.Evidence;
 /// directory, writes Running state, and supports write-new/register-existing
 /// artifacts with SHA-256 + byte inventory. No publication, no Complete state,
 /// no manifest.
+///
+/// Evidence-integrity rules:
+///  - WriteBytes never deletes a destination it did not itself create.
+///  - Parent directories are validated/created component-by-component from the
+///    staging root; writes and verifications never traverse a symlink/reparse point.
+///  - RunIdentity is immutable and pinned at the evidence schema version.
 /// </summary>
 public sealed class EvidenceStagingSession : IDisposable
 {
@@ -43,11 +49,13 @@ public sealed class EvidenceStagingSession : IDisposable
         var identityErrors = identity.Validate();
         if (identityErrors.Count > 0)
             throw new EvidenceStagingException("invalid run identity: " + string.Join("; ", identityErrors));
+        if (identity.EvidenceSchemaVersion != EvidenceSchema.Version)
+            throw new EvidenceStagingException($"evidence schema version mismatch: {identity.EvidenceSchemaVersion}");
 
         var layout = RunLayoutPaths.Create(runsRoot, identity.CandidateId, identity.RunId);
-        if (Directory.Exists(layout.FinalPath))
+        if (PathExists(layout.FinalPath))
             throw new EvidenceStagingException($"final path already exists and is never deleted/reused: {layout.FinalPath}");
-        if (Directory.Exists(layout.StagingPath))
+        if (PathExists(layout.StagingPath))
             throw new EvidenceStagingException($"staging path already exists and is never reused: {layout.StagingPath}");
 
         Directory.CreateDirectory(layout.CandidateRoot);
@@ -96,20 +104,34 @@ public sealed class EvidenceStagingSession : IDisposable
         return session;
     }
 
-    /// <summary>Write-new artifact (never overwrites, never duplicates).</summary>
+    /// <summary>Write-new artifact (never overwrites, never duplicates, never deletes a file it did not create).</summary>
     public EvidenceArtifactEntry WriteBytes(string relativePath, byte[] bytes)
     {
         ValidateWritable(relativePath);
         string full = EvidencePathSafety.ResolveUnderRoot(StagingPath, relativePath);
-        Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+        string stagingFull = Path.GetFullPath(StagingPath);
+
+        // Pre-write parent-chain validation: never write through a symlink/reparse parent.
+        string? chainError = EnsureSafeParentDirectories(stagingFull, relativePath, createMissing: true);
+        if (chainError is not null)
+            throw new EvidenceStagingException($"cannot write artifact '{relativePath}': {chainError}");
+
+        bool created = false;
         try
         {
-            using var fs = new FileStream(full, FileMode.CreateNew, FileAccess.Write);
-            fs.Write(bytes, 0, bytes.Length);
+            using (var fs = new FileStream(full, FileMode.CreateNew, FileAccess.Write))
+            {
+                created = true;
+                fs.Write(bytes, 0, bytes.Length);
+            }
         }
         catch (Exception ex) when (ex is not EvidenceStagingException)
         {
-            try { File.Delete(full); } catch { }
+            // Cleanup only when this exact call created the destination file.
+            if (created)
+            {
+                try { File.Delete(full); } catch { }
+            }
             throw new EvidenceStagingException($"failed to write artifact '{relativePath}': {ex.Message}", ex);
         }
         return AddSnapshot(relativePath, full);
@@ -133,19 +155,28 @@ public sealed class EvidenceStagingSession : IDisposable
     public IReadOnlyList<EvidenceArtifactEntry> RegisteredArtifacts
         => _inventory.OrderBy(e => e.RelativePath, StringComparer.Ordinal).ToList();
 
-    /// <summary>Re-stats every registered artifact; any mutation is reported.</summary>
+    /// <summary>Re-stats every registered artifact (incl. parent-chain re-check); any mutation is reported.</summary>
     public IReadOnlyList<string> VerifyRegisteredArtifacts()
     {
         var problems = new List<string>();
+        string stagingFull = Path.GetFullPath(StagingPath);
         foreach (var entry in RegisteredArtifacts)
         {
             string full = EvidencePathSafety.ResolveUnderRoot(StagingPath, entry.RelativePath);
-            if (!File.Exists(full))
+
+            string? chainProblem = AssertSafeParentChain(stagingFull, entry.RelativePath);
+            if (chainProblem is not null)
+            {
+                problems.Add($"{entry.RelativePath}: {chainProblem}");
+                continue;
+            }
+
+            if (!File.Exists(full) && !Directory.Exists(full))
             {
                 problems.Add($"{entry.RelativePath}: missing");
                 continue;
             }
-            if (IsReparseOrDirectory(full))
+            if (Directory.Exists(full) || IsReparseOrSymlink(full))
             {
                 problems.Add($"{entry.RelativePath}: replaced by directory/symlink/reparse point");
                 continue;
@@ -205,6 +236,8 @@ public sealed class EvidenceStagingSession : IDisposable
     /// <summary>No-op: the session never owns the staging tree's lifecycle for 1c.1.</summary>
     public void Dispose() { }
 
+    private static bool PathExists(string path) => File.Exists(path) || Directory.Exists(path);
+
     private static bool IsKnownControl(string canonicalRelative)
     {
         int slash = canonicalRelative.IndexOf('/');
@@ -244,26 +277,89 @@ public sealed class EvidenceStagingSession : IDisposable
     {
         if (!File.Exists(full))
             throw new EvidenceStagingException($"file does not exist: {relativePath}");
-        if (IsReparseOrDirectory(full))
+        string stagingFull = Path.GetFullPath(StagingPath);
+        string? chain = AssertSafeParentChain(stagingFull, relativePath);
+        if (chain is not null)
+            throw new EvidenceStagingException($"artifact parent traverses a symlink/reparse point: {relativePath}");
+        if (Directory.Exists(full) || IsReparseOrSymlink(full))
             throw new EvidenceStagingException($"artifact is not an ordinary file (symlink/reparse/directory): {relativePath}");
-        // Parent chain within staging must not traverse reparse points.
-        string? dir = Path.GetDirectoryName(full);
-        string staging = Path.GetFullPath(StagingPath);
-        while (dir is not null)
-        {
-            if (new DirectoryInfo(dir).LinkTarget is not null || (File.GetAttributes(dir) & FileAttributes.ReparsePoint) != 0)
-                throw new EvidenceStagingException($"artifact parent traverses a reparse point/symlink: {relativePath}");
-            if (string.Equals(Path.GetFullPath(dir), staging, StringComparison.Ordinal)) break;
-            dir = Path.GetDirectoryName(dir);
-        }
     }
 
-    private static bool IsReparseOrDirectory(string full)
+    /// <summary>
+    /// Walks canonical components from the staging root. When createMissing is
+    /// true, missing intermediate directories are created first; every existing
+    /// entry must be an ordinary directory, never a symlink/reparse point.
+    /// </summary>
+    private static string? EnsureSafeParentDirectories(string stagingFull, string canonicalRelative, bool createMissing)
     {
-        if (Directory.Exists(full)) return true;
-        var fi = new FileInfo(full);
-        if (fi.LinkTarget is not null) return true;
-        return (fi.Attributes & FileAttributes.ReparsePoint) != 0;
+        string? parentPart = Path.GetDirectoryName(canonicalRelative);
+        if (string.IsNullOrEmpty(parentPart)) return null;
+        string current = stagingFull;
+        foreach (string segment in parentPart.Split('/'))
+        {
+            if (segment.Length == 0) continue;
+            string next = Path.Combine(current, segment);
+            if (Directory.Exists(next))
+            {
+                if (IsReparseOrSymlink(next))
+                    return $"parent segment '{segment}' is a symlink/reparse point";
+            }
+            else if (File.Exists(next))
+            {
+                return $"parent segment '{segment}' is a file, not a directory";
+            }
+            else
+            {
+                if (!createMissing) return $"parent segment '{segment}' missing";
+                try
+                {
+                    Directory.CreateDirectory(next);
+                }
+                catch (Exception ex)
+                {
+                    return $"failed to create parent segment '{segment}': {ex.Message}";
+                }
+                if (IsReparseOrSymlink(next))
+                    return $"parent segment '{segment}' is a symlink/reparse point";
+            }
+            if (EvidencePathSafety.IsSamePath(next, current))
+                return "parent path did not advance";
+            current = next;
+        }
+        return null;
+    }
+
+    private static string? AssertSafeParentChain(string stagingFull, string canonicalRelative)
+        => EnsureSafeParentDirectories(stagingFull, canonicalRelative, createMissing: false);
+
+    private static bool IsReparseOrSymlink(string path)
+    {
+        try
+        {
+            // ResolveLinkTarget detects symlinks regardless of whether the target
+            // is a file or a directory, and independent of FileAttributes semantics.
+            if (File.ResolveLinkTarget(path, returnFinalTarget: false) is not null)
+                return true;
+            if (File.Exists(path))
+            {
+                var f = new FileInfo(path);
+                return f.LinkTarget is not null || (f.Attributes & FileAttributes.ReparsePoint) != 0;
+            }
+            if (Directory.Exists(path))
+            {
+                var d = new DirectoryInfo(path);
+                return d.LinkTarget is not null || (d.Attributes & FileAttributes.ReparsePoint) != 0;
+            }
+        }
+        catch (IOException)
+        {
+            return true; // treat as unsafe if we cannot inspect it
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return true;
+        }
+        return false;
     }
 
     private static string Sha256Of(string full)
