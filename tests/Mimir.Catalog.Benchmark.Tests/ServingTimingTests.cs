@@ -220,62 +220,120 @@ public class ServingTimingTests
 
 public class ServingTimingBoundaryTests
 {
-    private sealed class WatchList<T> : IReadOnlyList<T>
+    private sealed class BoundaryTimer : ITimer
+    {
+        private bool _running;
+        public bool IsRunning => _running;
+        public double StopSeconds() { _running = false; return 0.9; }
+        public void Start() => _running = true;
+    }
+
+    private sealed class GuardedList<T> : IReadOnlyList<T>
     {
         private readonly IReadOnlyList<T> _inner;
-        private int _enumerationCount;
-        private const int AllowedEnumerations = 2;
-
-        public WatchList(IReadOnlyList<T> inner) => _inner = inner;
+        private readonly BoundaryTimer _timer;
+        public GuardedList(IReadOnlyList<T> inner, BoundaryTimer timer) { _inner = inner; _timer = timer; }
         public T this[int index] => _inner[index];
         public int Count => _inner.Count;
-
         public IEnumerator<T> GetEnumerator()
         {
-            _enumerationCount++;
-            // A reintroduced timed .ToList()/enumeration would be the third
-            // enumeration (warmup canonical + warmup-copy + timed) and throws,
-            // making the run ERROR; the correct no-copy path stays VALID.
-            if (_enumerationCount > AllowedEnumerations) throw new InvalidOperationException("unexpected extra enumeration");
+            // Harness enumeration must never happen while the per-probe timer is
+            // running; a timed .ToList()/sort would trip this guard.
+            if (_timer.IsRunning) throw new InvalidOperationException("enumerated while timer running");
             return _inner.GetEnumerator();
         }
-
         System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
     }
 
-    private sealed class S2Candidate : IStorageCandidate
+    private sealed class OpBoundaryCandidate : IStorageCandidate
     {
-        public List<LexicalHit> Hits { get; } = new();
+        private readonly BoundaryTimer _timer;
+        private readonly string _op;
+        public bool AnyTimedInvocationInside { get; private set; }
+        public OpBoundaryCandidate(string op, BoundaryTimer timer) { _op = op; _timer = timer; }
+
         public void Open() { }
         public void Dispose() { }
-        public ConceptHit GetConcept(long qid) => new(false, false, false);
-        public IReadOnlyList<LexicalHit> LookupLexical(string lang, string value) => new WatchList<LexicalHit>(Hits);
-        public IReadOnlyList<LexicalRow> GetLexicalByQid(long qid) => Array.Empty<LexicalRow>();
-        public IReadOnlyList<long> GetInstanceOf(long subjectQid) => Array.Empty<long>();
-        public IReadOnlyList<long> GetSubclassOf(long subjectQid) => Array.Empty<long>();
+        private void Mark(string op) { if (op == _op && _timer.IsRunning) AnyTimedInvocationInside = true; }
+
+        public ConceptHit GetConcept(long qid) { Mark("S1"); return new ConceptHit(false, false, false); }
+        public IReadOnlyList<LexicalHit> LookupLexical(string lang, string value)
+        {
+            Mark("S2");
+            return _op == "S2" ? new GuardedList<LexicalHit>(new[] { new LexicalHit(7, "label") }, _timer) : Array.Empty<LexicalHit>();
+        }
+        public IReadOnlyList<LexicalRow> GetLexicalByQid(long qid)
+        {
+            Mark("S3");
+            return _op == "S3" ? new GuardedList<LexicalRow>(new[] { new LexicalRow(7, "en", "label", "v") }, _timer) : Array.Empty<LexicalRow>();
+        }
+        public IReadOnlyList<long> GetInstanceOf(long subjectQid)
+        {
+            Mark("S4");
+            return _op == "S4" ? new GuardedList<long>(new long[] { 5, 1 }, _timer) : Array.Empty<long>();
+        }
+        public IReadOnlyList<long> GetSubclassOf(long subjectQid)
+        {
+            Mark("S5");
+            return _op == "S5" ? new GuardedList<long>(new long[] { 8 }, _timer) : Array.Empty<long>();
+        }
     }
 
-    [Fact]
-    public void S2TimedRegion_ContainsNoEnumeration_CanonicalizesAfterTimer()
+    private static ServingWorkload WorkloadFor(string op)
     {
-        var candidate = new S2Candidate { Hits = { new LexicalHit(7, "label") } };
-        var probe = new ServingProbe("S2", 1, "Hit", true, null, "en", "alpha");
-        var expected = new ServingWorkload
+        ServingProbe probe;
+        string digest;
+        long card;
+        switch (op)
+        {
+            case "S2":
+                probe = new ServingProbe("S2", 1, "Hit", true, null, "en", "alpha");
+                digest = WorkloadOracle.LexMembersDigest(new List<(long, string)> { (7, "label") });
+                card = 1;
+                break;
+            case "S3":
+                probe = new ServingProbe("S3", 1, "Hit", true, 7, null, null);
+                digest = WorkloadOracle.LexicalRowsDigest(7, new List<(string, string, string)> { ("en", "label", "v") });
+                card = 1;
+                break;
+            case "S4":
+                probe = new ServingProbe("S4", 1, "Hit", true, 7, null, null);
+                digest = WorkloadOracle.AdjacencyDigest(new long[] { 1, 5 });
+                card = 2;
+                break;
+            default:
+                probe = new ServingProbe("S5", 1, "Hit", true, 7, null, null);
+                digest = WorkloadOracle.AdjacencyDigest(new long[] { 8 });
+                card = 1;
+                break;
+        }
+        return new ServingWorkload
         {
             Probes = new[] { probe },
             Expected = new Dictionary<(string, long), ServingExpected>
             {
-                [("S2", 1L)] = new("S2", 1, true, 1,
-                    WorkloadOracle.LexMembersDigest(new List<(long, string)> { (7, "label") })),
+                [(op, 1L)] = new(op, 1, true, card, digest),
             },
         };
-        var script = new ScriptedTimer(new double[] { 1.0 });
-        var exec = new ServingTimingRunner(candidate, expected, "S2", 1, () => script).Execute();
+    }
 
-        // If any timed .ToList()/enumeration had been reintroduced, the watch list
-        // would have been enumerated a third time and the run would be ERROR.
+    [Theory]
+    [InlineData("S2")]
+    [InlineData("S3")]
+    [InlineData("S4")]
+    [InlineData("S5")]
+    public void TimedRegion_ContainsCandidateInvocation_ButNoResultEnumeration(string op)
+    {
+        var timer = new BoundaryTimer();
+        var candidate = new OpBoundaryCandidate(op, timer);
+        var exec = new ServingTimingRunner(candidate, WorkloadFor(op), op, 1, () => timer).Execute();
+
         Assert.Equal(ServingStatuses.Valid, exec.Correctness);
         Assert.Single(exec.Samples);
-        Assert.Equal(1.0, exec.Samples[0].WallSeconds);
+        Assert.Equal(0.9, exec.Samples[0].WallSeconds);
+        // Candidate method itself executed while the timer was running...
+        Assert.True(candidate.AnyTimedInvocationInside, "candidate retrieval must run inside the timer");
+        // ...and no enumeration of the returned result happened while it was
+        // running (GuardedList throws otherwise): canonicalization is outside.
     }
 }
