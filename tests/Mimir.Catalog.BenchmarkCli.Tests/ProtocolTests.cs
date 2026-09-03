@@ -230,15 +230,15 @@ public class ChildProcessContractTests
         return p;
     }
 
-    private static ChildRequestEnvelope Request() => new()
+    private static ChildRequestEnvelope Request(WorkloadClass workloadClass = WorkloadClass.Serving, string operation = "S1") => new()
     {
         ProtocolVersion = ProtocolConstants.ChildProtocolVersion,
         CandidateId = CandidateAIdentity.CandidateId,
         CandidateConfigId = CandidateAIdentity.CandidateConfigId,
         WorkloadId = CandidateAIdentity.WorkloadId,
         CorpusId = CandidateAIdentity.CorpusId,
-        WorkloadClass = WorkloadClass.Serving,
-        Operation = "S1",
+        WorkloadClass = workloadClass,
+        Operation = operation,
         Repetition = 1,
         CandidatePath = "/data/candidate.db",
         WorkloadPath = "/data/workload",
@@ -301,14 +301,14 @@ public class ChildProcessContractTests
     }
 
     [Fact]
-    public void ValidRequest_PlaceholderExit3_NoFabricatedResult()
+    public void NonServingClass_PlaceholderExit3_NoFabricatedResult()
     {
         string dir = TempDir();
-        string req = Write(dir, "valid.json", ProtocolJson.ToJson(Request()));
+        string req = Write(dir, "valid.json", ProtocolJson.ToJson(Request(WorkloadClass.Build, "B1")));
         var (exit, stdout, stderr) = RunChild(req);
         Assert.Equal(ProtocolExitCodes.ExecutionNotImplemented, exit);
-        Assert.Empty(stdout); // no benchmark result is fabricated in 4d.1a
-        Assert.Contains("not implemented in 4d.1a", stderr);
+        Assert.Empty(stdout); // no benchmark result is fabricated
+        Assert.Contains("not implemented", stderr);
     }
 
     [Fact]
