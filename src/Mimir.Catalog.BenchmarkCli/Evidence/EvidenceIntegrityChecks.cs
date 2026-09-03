@@ -62,7 +62,7 @@ internal static class EvidenceIntegrityChecks
                 problems.Add($"invalid artifact path '{a.RelativePath}'");
                 continue;
             }
-            if (a.RelativePath == EvidenceStagingSession.StateFileName || a.RelativePath == EvidenceStagingSession.ManifestName)
+            if (a.RelativePath != EvidenceStagingSession.RunJsonName && EvidenceStagingSession.IsReservedControlPath(a.RelativePath))
                 problems.Add($"reserved control entry '{a.RelativePath}'");
             if (a.RelativePath == EvidenceStagingSession.RunJsonName) runJsonEntries++;
             if (!actual.Add(a.RelativePath)) problems.Add($"duplicate artifact '{a.RelativePath}'");

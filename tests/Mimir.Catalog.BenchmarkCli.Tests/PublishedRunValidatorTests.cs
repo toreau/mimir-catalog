@@ -248,4 +248,126 @@ public class PublishedRunValidatorTests : IDisposable
         Assert.Equal(before, File.ReadAllBytes(payload));
         Assert.Equal(stateBefore, File.ReadAllText(Path.Combine(Final(id), "run.state.json")));
     }
+    [Fact]
+    public void ControlLateSymlink_RunJson_Invalid_NotConsumed()
+    {
+        var id = Publish("ctl-link");
+        string runPath = Path.Combine(Final(id), "run.json");
+        string outside = Path.Combine(_root, "outside-run.json");
+        File.WriteAllText(outside, "{\"external\":true}");
+        File.Delete(runPath);
+        try { File.CreateSymbolicLink(runPath, outside); } catch (Exception) { return; }
+
+        var r = PublishedRunValidator.ValidateForTest(Runs, id, probe: null,
+            cp => { if (cp == PublishedValidatorCheckpoint.AfterInitialTreeWalk) { } });
+        Assert.Equal(PublishedRunValidationStatus.Invalid, r.Status);
+        Assert.Equal("{\"external\":true}", File.ReadAllText(outside));
+    }
+
+    [Fact]
+    public void CandidateRootLateReplacement_Invalid_NoReadThrough()
+    {
+        var id = Publish("cand-late");
+        string candidateRoot = Path.Combine(Runs, id.CandidateId);
+        string backup = Path.Combine(_root, "cand-late-backup");
+        Directory.Move(candidateRoot, backup);
+        try { Directory.CreateSymbolicLink(candidateRoot, backup); } catch (Exception) { Directory.Move(backup, candidateRoot); return; }
+
+        var r = PublishedRunValidator.ValidateForTest(Runs, id, probe: null,
+            cp => { if (cp == PublishedValidatorCheckpoint.AfterInitialTreeWalk) { } });
+        Assert.Equal(PublishedRunValidationStatus.Invalid, r.Status);
+    }
+
+    [Fact]
+    public void TypeTaxonomy_CandidateRootFile_AndFinalFile_Invalid()
+    {
+        Directory.CreateDirectory(Runs);
+        string candFile = Path.Combine(Runs, "sqlite-native-v1");
+        File.WriteAllText(candFile, "not a dir");
+        var r1 = PublishedRunValidator.Validate(Runs, Identity("tax-1"));
+        Assert.Equal(PublishedRunValidationStatus.Invalid, r1.Status);
+
+        Directory.CreateDirectory(Path.Combine(Runs, "other-native"));
+        string finalFile = Path.Combine(Runs, "other-native", "tax-final");
+        File.WriteAllText(finalFile, "file not dir");
+        var r2 = PublishedRunValidator.Validate(Runs, new RunIdentity
+        {
+            EvidenceSchemaVersion = EvidenceSchema.Version,
+            ProtocolVersion = ProtocolConstants.ChildProtocolVersion,
+            CandidateId = "other-native",
+            CandidateConfigId = CandidateAIdentity.CandidateConfigId,
+            WorkloadId = CandidateAIdentity.WorkloadId,
+            CorpusId = CandidateAIdentity.CorpusId,
+            RunId = "tax-final",
+        });
+        Assert.Equal(PublishedRunValidationStatus.Invalid, r2.Status);
+    }
+
+    [Fact]
+    public void ArtifactReplacedByDirectory_Invalid()
+    {
+        var id = Publish("dir-art");
+        string payload = Path.Combine(Final(id), "analytical", "A1", "result.json");
+        File.Delete(payload);
+        Directory.CreateDirectory(payload);
+        var r = PublishedRunValidator.Validate(Runs, id);
+        Assert.Equal(PublishedRunValidationStatus.Invalid, r.Status);
+    }
+
+    [Fact]
+    public void FinalRecheck_LateOrphanDirectory_Invalid()
+    {
+        var id = Publish("recheck-dir");
+        var r = PublishedRunValidator.ValidateForTest(Runs, id, probe: null, cp =>
+        {
+            if (cp == PublishedValidatorCheckpoint.BeforeFinalConsistencyRecheck)
+                Directory.CreateDirectory(Path.Combine(Final(id), "orphan-late"));
+        });
+        Assert.Equal(PublishedRunValidationStatus.Invalid, r.Status);
+    }
+
+    [Fact]
+    public void FinalRecheck_LateSymlink_Invalid_WhereSupported()
+    {
+        var id = Publish("recheck-link");
+        var r = PublishedRunValidator.ValidateForTest(Runs, id, probe: null, cp =>
+        {
+            if (cp == PublishedValidatorCheckpoint.BeforeFinalConsistencyRecheck)
+            {
+                string outside = Path.Combine(_root, "late-target.txt");
+                File.WriteAllText(outside, "x");
+                try { File.CreateSymbolicLink(Path.Combine(Final(id), "late-link.txt"), outside); } catch { }
+            }
+        });
+        if (File.Exists(Path.Combine(Final(id), "late-link.txt")))
+            Assert.Equal(PublishedRunValidationStatus.Invalid, r.Status);
+    }
+
+    [Fact]
+    public void FinalRecheck_InspectionFailure_Error()
+    {
+        var id = Publish("recheck-err");
+        bool fail = false;
+        var r = PublishedRunValidator.ValidateForTest(Runs, id,
+            path => fail && EvidencePathSafety.IsSamePath(path, Path.Combine(Runs, id.CandidateId))
+                ? NodeKind.InspectionError
+                : PublishedRunValidator.InspectNode(path),
+            cp => { if (cp == PublishedValidatorCheckpoint.BeforeFinalConsistencyRecheck) fail = true; });
+        Assert.Equal(PublishedRunValidationStatus.Error, r.Status);
+    }
+
+    [Fact]
+    public void ReservedControlNamespace_StructuralRejected()
+    {
+        foreach (var extra in new[] { ".state-tmp-fake.json", "run.json/child" })
+        {
+            var id = Publish("res-" + Guid.NewGuid().ToString("N")[..6]);
+            string mp = Path.Combine(Final(id), "evidence.manifest.json");
+            var parsed = EvidenceJson.ReadManifest(File.ReadAllBytes(mp));
+            var tampered = parsed with { Artifacts = parsed.Artifacts
+                .Append(new ManifestArtifact(extra, 1, "a".PadRight(64, 'a'))).ToList() };
+            File.WriteAllBytes(mp, EvidenceJson.SerializeManifest(tampered));
+            Assert.Equal(PublishedRunValidationStatus.Invalid, PublishedRunValidator.Validate(Runs, id).Status);
+        }
+    }
 }
