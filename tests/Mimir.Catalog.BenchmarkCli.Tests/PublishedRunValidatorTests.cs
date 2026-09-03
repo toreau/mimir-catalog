@@ -254,12 +254,19 @@ public class PublishedRunValidatorTests : IDisposable
         var id = Publish("ctl-link");
         string runPath = Path.Combine(Final(id), "run.json");
         string outside = Path.Combine(_root, "outside-run.json");
+        byte[] original = File.ReadAllBytes(runPath);
         File.WriteAllText(outside, "{\"external\":true}");
-        File.Delete(runPath);
-        try { File.CreateSymbolicLink(runPath, outside); } catch (Exception) { return; }
 
-        var r = PublishedRunValidator.ValidateForTest(Runs, id, probe: null,
-            cp => { if (cp == PublishedValidatorCheckpoint.AfterInitialTreeWalk) { } });
+        var r = PublishedRunValidator.ValidateForTest(Runs, id, probe: null, cp =>
+        {
+            if (cp != PublishedValidatorCheckpoint.AfterInitialTreeWalk) return;
+            // mutation happens only AFTER the initial walk validated the real file
+            File.Delete(runPath);
+            try { File.CreateSymbolicLink(runPath, outside); }
+            catch (Exception) { File.WriteAllBytes(runPath, original); }
+        });
+        if (!File.Exists(runPath) || (new FileInfo(runPath).LinkTarget is null && File.ReadAllText(runPath) != "{\"external\":true}"))
+            return; // symlink unsupported: fixture restored
         Assert.Equal(PublishedRunValidationStatus.Invalid, r.Status);
         Assert.Equal("{\"external\":true}", File.ReadAllText(outside));
     }
@@ -270,11 +277,18 @@ public class PublishedRunValidatorTests : IDisposable
         var id = Publish("cand-late");
         string candidateRoot = Path.Combine(Runs, id.CandidateId);
         string backup = Path.Combine(_root, "cand-late-backup");
-        Directory.Move(candidateRoot, backup);
-        try { Directory.CreateSymbolicLink(candidateRoot, backup); } catch (Exception) { Directory.Move(backup, candidateRoot); return; }
+        if (Directory.Exists(backup)) Directory.Delete(backup, recursive: true);
 
-        var r = PublishedRunValidator.ValidateForTest(Runs, id, probe: null,
-            cp => { if (cp == PublishedValidatorCheckpoint.AfterInitialTreeWalk) { } });
+        var r = PublishedRunValidator.ValidateForTest(Runs, id, probe: null, cp =>
+        {
+            if (cp != PublishedValidatorCheckpoint.AfterInitialTreeWalk) return;
+            // mutation only after the initial walk saw an ordinary CandidateRoot
+            Directory.Move(candidateRoot, backup);
+            try { Directory.CreateSymbolicLink(candidateRoot, backup); }
+            catch (Exception) { Directory.Move(backup, candidateRoot); }
+        });
+        if (!Directory.Exists(candidateRoot) || !Directory.Exists(backup))
+            return; // symlink unsupported: fixture restored to ordinary dir
         Assert.Equal(PublishedRunValidationStatus.Invalid, r.Status);
     }
 
@@ -369,5 +383,22 @@ public class PublishedRunValidatorTests : IDisposable
             File.WriteAllBytes(mp, EvidenceJson.SerializeManifest(tampered));
             Assert.Equal(PublishedRunValidationStatus.Invalid, PublishedRunValidator.Validate(Runs, id).Status);
         }
+    }
+    [Fact]
+    public void LazyEnumerationFailure_Error_NoEscape()
+    {
+        var id = Publish("enum-fail");
+        string final = Final(id);
+        var r = PublishedRunValidator.ValidateForTest(Runs, id, probe: null, checkpoint: null,
+            enumerate: path => EvidencePathSafety.IsSamePath(path, final)
+                ? FaultyEnumeration(path)
+                : Directory.EnumerateFileSystemEntries(path));
+        Assert.Equal(PublishedRunValidationStatus.Error, r.Status);
+    }
+
+    private static IEnumerable<string> FaultyEnumeration(string root)
+    {
+        yield return Path.Combine(root, "run.state.json");
+        throw new IOException("injected enumeration failure");
     }
 }

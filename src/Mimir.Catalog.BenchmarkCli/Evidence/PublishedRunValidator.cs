@@ -31,20 +31,22 @@ internal enum PublishedValidatorCheckpoint { AfterInitialTreeWalk, BeforeFinalCo
 public static class PublishedRunValidator
 {
     public static PublishedRunValidationResult Validate(string runsRoot, RunIdentity expectedIdentity)
-        => ValidateCore(runsRoot, expectedIdentity, probe: null, checkpoint: null);
+        => ValidateCore(runsRoot, expectedIdentity, probe: null, checkpoint: null, enumerate: null);
 
     internal static PublishedRunValidationResult ValidateForTest(
         string runsRoot,
         RunIdentity expectedIdentity,
-        Func<string, NodeKind>? probe,
-        Action<PublishedValidatorCheckpoint>? checkpoint = null)
-        => ValidateCore(runsRoot, expectedIdentity, probe, checkpoint);
+        Func<string, NodeKind>? probe = null,
+        Action<PublishedValidatorCheckpoint>? checkpoint = null,
+        Func<string, IEnumerable<string>>? enumerate = null)
+        => ValidateCore(runsRoot, expectedIdentity, probe, checkpoint, enumerate);
 
     private static PublishedRunValidationResult ValidateCore(
         string runsRoot,
         RunIdentity expectedIdentity,
         Func<string, NodeKind>? probe,
-        Action<PublishedValidatorCheckpoint>? checkpoint)
+        Action<PublishedValidatorCheckpoint>? checkpoint,
+        Func<string, IEnumerable<string>>? enumerate)
     {
         NodeKind Inspect(string path) => probe?.Invoke(path) ?? InspectNode(path);
         var layout = RunLayoutPaths.Create(runsRoot, expectedIdentity.CandidateId, expectedIdentity.RunId);
@@ -59,7 +61,7 @@ public static class PublishedRunValidator
         if (ReturnIfStop(layout, invalid, errors, ref stopped, out var stoppedResult)) return stoppedResult;
 
         // 2. whole-tree walk (never follows links)
-        WalkResult walk = WalkTree(final, probe);
+        WalkResult walk = WalkTree(final, probe, enumerate);
         if (walk.HadInspectionError) errors.Add("whole-tree inspection failed operationally");
         if (walk.LinkOrReparseFound) invalid.Add("final subtree contains a symlink/reparse point");
         if (ReturnIfStop(layout, invalid, errors, ref stopped, out stoppedResult)) return stoppedResult;
@@ -109,6 +111,7 @@ public static class PublishedRunValidator
         // 6. per-artifact link-safe cryptographic validation (fresh trusted location first)
         foreach (var artifact in manifest.Artifacts)
         {
+            if (artifact.RelativePath == EvidenceStagingSession.RunJsonName) continue; // safe-read exactly once as a control file
             CheckArtifact(candidateRoot, final, artifact, Inspect, invalid, errors);
             if (ReturnIfStop(layout, invalid, errors, ref stopped, out stoppedResult)) return stoppedResult;
         }
@@ -122,7 +125,7 @@ public static class PublishedRunValidator
         CheckTrustedLocation(candidateRoot, final, Inspect, invalid, errors);
         if (ReturnIfStop(layout, invalid, errors, ref stopped, out stoppedResult)) return stoppedResult;
 
-        WalkResult rewalk = WalkTree(final, probe);
+        WalkResult rewalk = WalkTree(final, probe, enumerate);
         if (rewalk.HadInspectionError) errors.Add("final consistency recheck failed operationally");
         if (rewalk.LinkOrReparseFound) invalid.Add("final subtree gained a symlink/reparse point during validation");
         foreach (var missing in expectedFiles.Where(f => !rewalk.Files.Contains(f))) invalid.Add($"file disappeared during validation: {missing}");
@@ -281,45 +284,51 @@ public static class PublishedRunValidator
         public bool HadInspectionError { get; set; }
     }
 
-    private static WalkResult WalkTree(string root, Func<string, NodeKind>? probe)
+    private static WalkResult WalkTree(string root, Func<string, NodeKind>? probe, Func<string, IEnumerable<string>>? enumerate)
     {
         var result = new WalkResult();
-        Walk(root, "", result, probe);
+        Walk(root, "", result, probe, enumerate);
         result.Files.Sort(StringComparer.Ordinal);
         result.Directories.Sort(StringComparer.Ordinal);
         return result;
     }
 
-    private static void Walk(string absolute, string relative, WalkResult result, Func<string, NodeKind>? probe)
+    private static void Walk(string absolute, string relative, WalkResult result, Func<string, NodeKind>? probe, Func<string, IEnumerable<string>>? enumerate)
     {
-        IEnumerable<string> entries;
-        try { entries = Directory.EnumerateFileSystemEntries(absolute); }
-        catch (Exception ex) { result.HadInspectionError = true; return; }
-
-        foreach (string entry in entries)
+        try
         {
-            string name = Path.GetFileName(entry);
-            string rel = relative.Length == 0 ? name : relative + "/" + name;
-            NodeKind kind = probe?.Invoke(entry) ?? InspectNode(entry);
-            switch (kind)
+            // EnumerateFileSystemEntries is lazy: iteration must stay inside the
+            // try so failures while advancing the enumerator cannot escape.
+            IEnumerable<string> entries = enumerate?.Invoke(absolute) ?? Directory.EnumerateFileSystemEntries(absolute);
+            foreach (string entry in entries)
             {
-                case NodeKind.SymlinkOrReparse:
-                    result.LinkOrReparseFound = true;
-                    break;
-                case NodeKind.InspectionError:
-                    result.HadInspectionError = true;
-                    break;
-                case NodeKind.OrdinaryDirectory:
-                    result.Directories.Add(rel);
-                    Walk(entry, rel, result, probe);
-                    break;
-                case NodeKind.OrdinaryFile:
-                    result.Files.Add(rel);
-                    break;
-                default:
-                    result.HadInspectionError = true;
-                    break;
+                string name = Path.GetFileName(entry);
+                string rel = relative.Length == 0 ? name : relative + "/" + name;
+                NodeKind kind = probe?.Invoke(entry) ?? InspectNode(entry);
+                switch (kind)
+                {
+                    case NodeKind.SymlinkOrReparse:
+                        result.LinkOrReparseFound = true;
+                        break;
+                    case NodeKind.InspectionError:
+                        result.HadInspectionError = true;
+                        break;
+                    case NodeKind.OrdinaryDirectory:
+                        result.Directories.Add(rel);
+                        Walk(entry, rel, result, probe, enumerate);
+                        break;
+                    case NodeKind.OrdinaryFile:
+                        result.Files.Add(rel);
+                        break;
+                    default:
+                        result.HadInspectionError = true;
+                        break;
+                }
             }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            result.HadInspectionError = true;
         }
     }
 
