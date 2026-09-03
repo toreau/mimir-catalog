@@ -186,99 +186,23 @@ public static class EvidenceFinalizer
         // 16. deterministic test checkpoint before the authoritative final snapshot
         hook?.Invoke(EvidenceFinalizeCheckpoint.BeforeFinalControlVerification);
 
-        // 17. one authoritative post-checkpoint staging snapshot
-        TreeView gate;
-        try
-        {
-            gate = EvidenceTreeInspector.Inspect(staging);
-        }
-        catch (Exception ex)
-        {
-            throw new FinalizeStageException("finalize:tree", ex.Message);
-        }
-        EnsureInventory(staging, gate, session,
-            additionalFiles: new[] { EvidenceStagingSession.RunJsonName, EvidenceStagingSession.ManifestName },
-            "finalize:inventory");
-        var gateProblems = session.VerifyRegisteredArtifacts();
-        if (gateProblems.Count > 0)
-            throw new FinalizeStageException("finalize:registered", string.Join("; ", gateProblems));
+        // 17. authoritative final gate. This readiness validation is the LAST
+        // filesystem/integrity operation: its returned facts are consumed
+        // directly and no control-file read follows a valid result.
+        var readiness = EvidenceReadinessValidator.Validate(session, EvidenceExpectedState.Running);
+        if (!readiness.IsValid)
+            throw new FinalizeStageException("finalize:readiness", string.Join("; ", readiness.Problems));
 
-        // 18. run.state.json must be freshly present, parseable and exactly Running
-        byte[] stateBytes = ReadControlBytes(staging, EvidenceStagingSession.StateFileName, "finalize:state");
-        string stateName;
-        string stateRunId;
-        string stateCandidateId;
-        try
-        {
-            using var doc = System.Text.Json.JsonDocument.Parse(stateBytes);
-            var root = doc.RootElement;
-            if (root.ValueKind != System.Text.Json.JsonValueKind.Object)
-                throw new EvidenceStagingException("run.state.json must be a JSON object");
-            stateName = root.TryGetProperty("state", out var st) && st.ValueKind == System.Text.Json.JsonValueKind.String ? st.GetString()! : throw new EvidenceStagingException("missing/invalid 'state'");
-            stateRunId = root.TryGetProperty("run_id", out var r) && r.ValueKind == System.Text.Json.JsonValueKind.String ? r.GetString()! : throw new EvidenceStagingException("missing/invalid 'run_id'");
-            stateCandidateId = root.TryGetProperty("candidate_id", out var c) && c.ValueKind == System.Text.Json.JsonValueKind.String ? c.GetString()! : throw new EvidenceStagingException("missing/invalid 'candidate_id'");
-        }
-        catch (Exception ex)
-        {
-            throw new FinalizeStageException("finalize:state", $"invalid run.state.json: {ex.Message}");
-        }
-        if (stateName != "Running")
-            throw new FinalizeStageException("finalize:state", $"state must be exactly Running, found '{stateName}'");
-        if (stateRunId != identity.RunId || stateCandidateId != identity.CandidateId)
-            throw new FinalizeStageException("finalize:state", "run.state.json identity does not match session identity");
-
-        // 19. fresh reread + strict revalidation of immutable control files
-        byte[] runFresh = ReadControlBytes(staging, EvidenceStagingSession.RunJsonName, "finalize:strict-validate");
-        byte[] manifestFresh = ReadControlBytes(staging, EvidenceStagingSession.ManifestName, "finalize:strict-validate");
-        EvidenceRunJson runParsedFresh;
-        EvidenceManifest manifestParsedFresh;
-        try
-        {
-            runParsedFresh = EvidenceJson.ReadRunJson(runFresh);
-            manifestParsedFresh = EvidenceJson.ReadManifest(manifestFresh);
-        }
-        catch (Exception ex)
-        {
-            throw new FinalizeStageException("finalize:strict-validate", ex.Message);
-        }
-        ValidateRunIdentity(identity, runParsedFresh, manifestParsedFresh);
-        ValidateManifestSemantics(session, manifestParsedFresh, manifestFresh.Length, "");
-
-        // 20. fresh run.json bytes/hash must match fresh manifest entry + disk
-        string runShaFresh = EvidenceControlWriter.Sha256(runFresh);
-        var runFreshEntry = manifestParsedFresh.Artifacts.Single(x => x.RelativePath == EvidenceStagingSession.RunJsonName);
-        if (runFreshEntry.Bytes != runFresh.Length || runFreshEntry.Sha256 != runShaFresh)
-            throw new FinalizeStageException("finalize:strict-validate", "run.json manifest entry no longer matches fresh disk bytes");
-        VerifyManifestEntriesAgainstDisk(session, manifestParsedFresh, runFresh, runShaFresh, gate);
-
-        // 21. final destination recheck
-        EnsureFinalAbsent(final, "finalize:final-destination");
-
-        // ReadyForPromotion (in memory only; state remains Running). Manifest
-        // bytes/SHA are computed from the fresh final manifest bytes.
-        string manifestShaFinal = EvidenceControlWriter.Sha256(manifestFresh);
         return new EvidenceFinalizationResult
         {
             Status = EvidenceFinalizationStatus.ReadyForPromotion,
             StagingPath = staging,
             FinalPath = final,
-            RunJson = runParsedFresh,
-            ManifestBytes = manifestFresh,
-            ManifestSha256 = manifestShaFinal,
+            RunJson = readiness.RunJson!,
+            ManifestBytes = readiness.ManifestBytes!,
+            ManifestSha256 = readiness.ManifestSha256!,
             Problems = Array.Empty<string>(),
         };
-    }
-
-    private static byte[] ReadControlBytes(string staging, string name, string stage)
-    {
-        try
-        {
-            return File.ReadAllBytes(Path.Combine(staging, name));
-        }
-        catch (Exception ex)
-        {
-            throw new FinalizeStageException(stage, $"failed to reread {name}: {ex.Message}");
-        }
     }
 
     private static EvidenceRunJson ToRunJson(RunIdentity id) => new(
