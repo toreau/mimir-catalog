@@ -2,8 +2,10 @@
   <Folder Name="/src/">
     <Project Path="src/Mimir.Catalog.Corpus/Mimir.Catalog.Corpus.csproj" />
     <Project Path="src/Mimir.Catalog.CorpusCli/Mimir.Catalog.CorpusCli.csproj" />
+    <Project Path="src/Mimir.Catalog.Workload/Mimir.Catalog.Workload.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Mimir.Catalog.Corpus.Tests/Mimir.Catalog.Corpus.Tests.csproj" />
+    <Project Path="tests/Mimir.Catalog.Workload.Tests/Mimir.Catalog.Workload.Tests.csproj" />
   </Folder>
 </Solution>

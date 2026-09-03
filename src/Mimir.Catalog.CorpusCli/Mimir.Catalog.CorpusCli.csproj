@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Mimir.Catalog.Corpus\Mimir.Catalog.Corpus.csproj" />
+    <ProjectReference Include="..\Mimir.Catalog.Workload\Mimir.Catalog.Workload.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

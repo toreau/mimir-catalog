@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Mimir.Catalog.Corpus;
+using Mimir.Catalog.Workload;
 
 namespace Mimir.Catalog.CorpusCli;
 
@@ -20,6 +21,7 @@ public static class Program
                 "cid" => Cid(args),
                 "inspect" => RunInspect(args),
                 "validate" => RunValidate(args),
+                "gen-workload" => RunGenWorkload(args),
                 _ => Usage(),
             };
         }
@@ -133,6 +135,37 @@ public static class Program
         return verdict == CorpusValidation.GO ? 0 : 1;
     }
 
+    private static int RunGenWorkload(string[] args)
+    {
+        string corpus = Get(args, "--corpus", Path.Combine("data", "corpus", CorpusIdentity.ComputeId()));
+        string fixture = Get(args, "--fixture", Path.Combine("validation", "phase0-anchors-v1.json"));
+        string? outRoot = null;
+        int oi = Array.IndexOf(args, "--out");
+        if (oi >= 0 && oi + 1 < args.Length) outRoot = args[oi + 1];
+        string contract = Get(args, "--contract", WorkloadRun.DefaultContractPath);
+        Console.WriteLine($"workload generation start: corpus={corpus} fixture={fixture} contract={contract}");
+        RunReport report = WorkloadRun.Run(corpus, fixture, outRoot, contract);
+        Console.WriteLine($"verdict={report.Verdict}");
+        Console.WriteLine($"corpusId={report.CorpusId} workloadId={report.WorkloadId}");
+        Console.WriteLine($"contractSha={report.MachineContractSha}");
+        Console.WriteLine($"measured serving={report.MeasuredServingCount} g1={report.MeasuredG1Count} g2={report.G2BatchCount}");
+        Console.WriteLine($"g1 candidates={report.G1CandidatesConsidered} rejectedGuard={report.G1RejectedGuard} maxVisited={report.G1MaxVisited}");
+        Console.WriteLine($"g2 candidates={report.G2CandidatesConsidered} rejectedGuard={report.G2RejectedGuard} accepted={report.G2Accepted} maxVisited={report.G2MaxVisited}");
+        Console.WriteLine($"wallSec={report.WallSeconds:F1} managedBytes={report.ManagedBytes}");
+        foreach (var pc in report.PoolCardinalities.OrderBy(k => k.Key))
+            Console.WriteLine($"  pool {pc.Key} {pc.Value}");
+        Console.WriteLine("continuity: " + string.Join(", ", report.Continuity.Select(k => $"{k.Key}={k.Value}")));
+        if (report.Verdict == WorkloadRun.Go)
+        {
+            Console.WriteLine($"published={report.PublishedDir}");
+            foreach (var f in report.FileSha256.OrderBy(k => k.Key))
+                Console.WriteLine($"  {f.Key} {f.Value}");
+            return 0;
+        }
+        foreach (var r in report.Reasons) Console.WriteLine($"  HOLD: {r}");
+        return 2;
+    }
+
     private static int Cid(string[] args)
     {
         Console.WriteLine(CorpusIdentity.ComputeId());
@@ -148,7 +181,8 @@ public static class Program
             "  fixture --source <path>\n" +
             "  cid\n" +
             "  inspect --corpus <corpus-root>\n" +
-            "  validate --corpus <corpus-root> [--fixture <path>]");
+            "  validate --corpus <corpus-root> [--fixture <path>]\n" +
+            "  gen-workload --corpus <corpus-root> [--fixture <path>] [--contract <path>] [--out <benchmark-root>]");
         return 2;
     }
 
