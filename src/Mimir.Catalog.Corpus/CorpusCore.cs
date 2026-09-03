@@ -99,11 +99,15 @@ public static class CorpusHash
 }
 
 /// <summary>
-/// Corpus identity derived from the frozen contract descriptor plus the pinned
-/// source identity. Deterministic; a fraction/rule change yields a new id.
+/// Deterministic corpus-contract/configuration identity, derived from the
+/// frozen contract descriptor only (sampling fraction, domain, modulus,
+/// threshold, languages). The pinned source identity is recorded separately
+/// (source SHA-256 and size); snapshot/materialization identity is a separate,
+/// later concern. A fraction/rule change yields a new corpus identity.
 /// </summary>
 public static class CorpusIdentity
 {
+    /// <summary>Corpus-contract/configuration identity (not source identity).</summary>
     public static string ComputeId()
     {
         var bytes = System.Text.Encoding.UTF8.GetBytes(CorpusContract.Descriptor());

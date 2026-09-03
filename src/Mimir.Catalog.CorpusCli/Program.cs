@@ -8,18 +8,17 @@ public static class Program
     public static int Main(string[] args)
     {
         if (args.Length == 0)
-        {
-            Console.Error.WriteLine("usage: passa --source <path> --work <dir> [--skip-sha] | fixture --source <path>");
-            return 2;
-        }
+            return Usage();
 
         try
         {
             return args[0] switch
             {
                 "passa" => RunPassA(args),
+                "passb" => RunPassB(args),
                 "fixture" => RunFixture(args),
                 "cid" => Cid(args),
+                "inspect" => RunInspect(args),
                 _ => Usage(),
             };
         }
@@ -30,6 +29,93 @@ public static class Program
         }
     }
 
+    private static int RunPassB(string[] args)
+    {
+        string source = Get(args, "--source", SourceIdentity.ExpectedPath);
+        string corpus = Get(args, "--corpus", Path.Combine("data", "corpus", CorpusIdentity.ComputeId()));
+        Console.WriteLine($"Pass B start: source={source} corpus={corpus}");
+        var opts = new PassBOptions { SourcePath = source, CorpusRoot = corpus };
+        PassBEvidence ev = PassB.Run(opts);
+        Console.WriteLine($"concepts={ev.ConceptRows} lexical={ev.LexicalRows} instanceOf={ev.InstanceOfRows} subclassOf={ev.SubclassOfRows}");
+        Console.WriteLine($"observedConcepts={ev.ObservedConceptRows} unobservedTail={ev.UnobservedConceptTail}");
+        Console.WriteLine($"tiers: T1={ev.T1Concepts} T2={ev.T2Concepts} cap={ev.T1IntersectT2} t2Only={ev.T2Only} union={ev.T1Concepts + ev.T2Only}");
+        Console.WriteLine($"t2Seen={ev.T2SeenCount} t2Unseen={ev.T2UnseenCount} wallSec={ev.WallSeconds:F1}");
+        Console.WriteLine($"published -> {ev.PublishedDir}");
+        Console.WriteLine($"materialization -> {ev.MaterializationPath}");
+        return 0;
+    }
+
+    private static int RunInspect(string[] args)
+    {
+        string corpus = Get(args, "--corpus", Path.Combine("data", "corpus", CorpusIdentity.ComputeId()));
+        string passB = Path.Combine(corpus, "pass-b");
+        var files = new (string Relation, string File)[]{
+            ("concept", "concept.parquet"),
+            ("lexical_entry", "lexical_entry.parquet"),
+            ("instance_of", "instance_of.parquet"),
+            ("subclass_of", "subclass_of.parquet"),
+        };
+
+        string matPath = Path.Combine(passB, "materialization.json");
+        if (!File.Exists(matPath)) { Console.Error.WriteLine($"missing {matPath}"); return 1; }
+        using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(matPath));
+        var artifacts = doc.RootElement.GetProperty("artifacts");
+
+        bool allOk = true;
+        foreach (var (relation, file) in files)
+        {
+            string path = Path.Combine(passB, file);
+            bool fileExists = File.Exists(path);
+            Mimir.Catalog.Corpus.ParquetInspection.Result? insp = fileExists
+                ? Mimir.Catalog.Corpus.ParquetInspection.Inspect(path)
+                : null;
+            string schema = "missing";
+            long rows = -1;
+            if (insp != null)
+            {
+                var expected = relation switch
+                {
+                    "concept" => Mimir.Catalog.Corpus.PassBSchema.Concept,
+                    "lexical_entry" => Mimir.Catalog.Corpus.PassBSchema.LexicalEntry,
+                    _ => Mimir.Catalog.Corpus.PassBSchema.Edge,
+                };
+                var cols = insp.Columns;
+                var exp = Mimir.Catalog.Corpus.ParquetInspection.ColumnsOf(expected);
+                schema = cols.Count == exp.Count && cols.Zip(exp).All(p => p.First == p.Second) ? "match" : "MISMATCH";
+                rows = insp.RowCount;
+            }
+            var art = artifacts.GetProperty(relation);
+            long artRows = art.GetProperty("rowCount").GetInt64();
+            long artSize = art.GetProperty("byteSize").GetInt64();
+            long artRg = art.GetProperty("rowGroupCount").GetInt64();
+            string artSha = art.GetProperty("sha256").GetString()!;
+            long actualSize = fileExists ? new FileInfo(path).Length : -1;
+            string actualSha = fileExists ? Mimir.Catalog.Corpus.PassB.Sha256OfFile(path) : "n/a";
+            int actualRg = insp?.RowGroupCount ?? -1;
+            bool schemaOk = schema == "match";
+            bool sizeOk = actualSize == artSize;
+            bool shaOk = actualSha == artSha;
+            bool rowsOk = rows == artRows;
+            bool rgOk = actualRg == artRg;
+            bool fileOk = fileExists && schemaOk && sizeOk && shaOk && rowsOk && rgOk;
+            allOk &= fileOk;
+            Console.WriteLine($"{relation}: exists={fileExists} schema={schema} rows={rows} (evidence {artRows}) " +
+                              $"rowGroups={actualRg} (evidence {artRg}) size={actualSize} (evidence {artSize}) shaMatch={shaOk}");
+        }
+
+        string statePath = Path.Combine(passB, "pass-b.state.json");
+        bool complete = false;
+        if (File.Exists(statePath))
+        {
+            using var stateDoc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(statePath));
+            complete = stateDoc.RootElement.TryGetProperty("state", out var s) && s.GetString() == "Complete";
+        }
+        Console.WriteLine($"pass-b.state.json state=Complete: {complete}");
+        allOk &= complete;
+        Console.WriteLine(allOk ? "INSPECT PASS" : "INSPECT FAIL");
+        return allOk ? 0 : 1;
+    }
+
     private static int Cid(string[] args)
     {
         Console.WriteLine(CorpusIdentity.ComputeId());
@@ -38,7 +124,13 @@ public static class Program
 
     private static int Usage()
     {
-        Console.Error.WriteLine("usage: passa --source <path> --work <dir> [--skip-sha] | fixture --source <path>");
+        Console.Error.WriteLine(
+            "usage:\n" +
+            "  passa  --source <path> [--work <dir>] [--skip-sha]\n" +
+            "  passb  --source <path> --corpus <corpus-root>\n" +
+            "  fixture --source <path>\n" +
+            "  cid\n" +
+            "  inspect --corpus <corpus-root>");
         return 2;
     }
 
