@@ -14,7 +14,14 @@ public static class ChildProcessRunner
     /// <summary>Infrastructure cleanup/drain grace; not a benchmark timeout.</summary>
     public static readonly TimeSpan CleanupGrace = TimeSpan.FromSeconds(5);
 
-    public static async Task<ChildProcessResult> RunAsync(ProcessInvocation invocation, TimeSpan timeout, ChildRequestEnvelope request)
+    public static Task<ChildProcessResult> RunAsync(ProcessInvocation invocation, TimeSpan timeout, ChildRequestEnvelope request)
+        => RunCoreAsync(invocation, timeout, request, process => process.Kill(entireProcessTree: true));
+
+    /// <summary>Test-only seam: injects the kill action so kill success/failure is deterministic.</summary>
+    internal static Task<ChildProcessResult> RunAsyncForTest(ProcessInvocation invocation, TimeSpan timeout, ChildRequestEnvelope request, Action<System.Diagnostics.Process> killAction)
+        => RunCoreAsync(invocation, timeout, request, killAction);
+
+    private static async Task<ChildProcessResult> RunCoreAsync(ProcessInvocation invocation, TimeSpan timeout, ChildRequestEnvelope request, Action<System.Diagnostics.Process> killAction)
     {
         var sw = Stopwatch.StartNew();
         using var process = new System.Diagnostics.Process();
@@ -63,7 +70,7 @@ public static class ChildProcessRunner
                 bool killSucceeded = false;
                 try
                 {
-                    process.Kill(entireProcessTree: true);
+                    killAction(process);
                     killSucceeded = true;
                 }
                 catch (Exception kex)
@@ -71,28 +78,26 @@ public static class ChildProcessRunner
                     killError = kex.Message;
                 }
 
-                var exitTask = process.WaitForExitAsync();
-                _ = await Task.WhenAny(exitTask, Task.Delay(CleanupGrace)).ConfigureAwait(false);
-                bool wrapperExitObserved = process.HasExited;
-
-                (bool drainCompleted, string? cleanupError) = await DrainWithinGrace(stdoutTask, stderrTask).ConfigureAwait(false);
+                // One single cleanup budget: wrapper-exit observation and output
+                // drains all share CleanupGrace. No per-phase grace restarts.
+                var cleanup = await TimeoutCleanupAsync(process, stdoutTask, stderrTask, CleanupGrace).ConfigureAwait(false);
 
                 return new ChildProcessResult
                 {
                     Outcome = ProcessOutcome.Timeout,
                     TimedOut = true,
                     ExitCode = process.HasExited ? process.ExitCode : null,
-                    Stdout = drainCompleted ? await stdoutTask.ConfigureAwait(false) : "",
-                    Stderr = drainCompleted ? await stderrTask.ConfigureAwait(false) : "",
+                    Stdout = cleanup.DrainCompleted ? await stdoutTask.ConfigureAwait(false) : "",
+                    Stderr = cleanup.DrainCompleted ? await stderrTask.ConfigureAwait(false) : "",
                     ElapsedParentWallSeconds = sw.Elapsed.TotalSeconds,
                     KillAttempted = true,
                     KillCallSucceeded = killSucceeded,
                     KillError = killError,
-                    WrapperExitObserved = wrapperExitObserved,
+                    WrapperExitObserved = cleanup.WrapperExitObserved,
                     DescendantTerminationVerified = false,
-                    OutputDrainCompleted = drainCompleted,
-                    CleanupError = cleanupError,
-                    ValidationError = cleanupError ?? (drainCompleted ? null : "timeout cleanup grace expired"),
+                    OutputDrainCompleted = cleanup.DrainCompleted,
+                    CleanupError = cleanup.Error,
+                    ValidationError = cleanup.Error ?? (cleanup.DrainCompleted ? null : "timeout cleanup grace expired"),
                 };
             }
 
@@ -201,13 +206,61 @@ public static class ChildProcessRunner
         }
     }
 
+
+    private sealed record TimeoutCleanupState(bool WrapperExitObserved, bool DrainCompleted, string? Error);
+
+    private static async Task<TimeoutCleanupState> TimeoutCleanupAsync(
+        System.Diagnostics.Process process,
+        Task<string> stdoutTask,
+        Task<string> stderrTask,
+        TimeSpan budget)
+    {
+        var clock = Stopwatch.StartNew();
+        var drains = Task.WhenAll(stdoutTask, stderrTask);
+        var exitWait = process.WaitForExitAsync();
+
+        // Wrapper-exit observation first, sharing the single budget.
+        TimeSpan remaining = budget - clock.Elapsed;
+        var exitWinner = await Task.WhenAny(exitWait, Task.Delay(remaining <= TimeSpan.Zero ? TimeSpan.Zero : remaining)).ConfigureAwait(false);
+        bool wrapperExitObserved = process.HasExited;
+
+        // Output drains within whatever budget remains.
+        remaining = budget - clock.Elapsed;
+        var drainWinner = await Task.WhenAny(drains, Task.Delay(remaining <= TimeSpan.Zero ? TimeSpan.Zero : remaining)).ConfigureAwait(false);
+        bool drainCompleted = drainWinner == drains;
+        if (drainCompleted)
+        {
+            try
+            {
+                await drains.ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                return new TimeoutCleanupState(wrapperExitObserved, false, $"output drain fault: {ex.Message}");
+            }
+        }
+
+        string? error = drainCompleted
+            ? null
+            : "cleanup budget expired before output drains completed";
+        return new TimeoutCleanupState(wrapperExitObserved, drainCompleted, error);
+    }
+
     private static async Task<(bool Completed, string? Error)> DrainWithinGrace(Task<string> stdoutTask, Task<string> stderrTask)
     {
         var all = Task.WhenAll(stdoutTask, stderrTask);
-        var winner = await Task.WhenAny(all, Task.Delay(CleanupGrace)).ConfigureAwait(false);
-        if (winner != all)
-            return (false, "output drain grace expired");
-        return (true, null);
+        try
+        {
+            var winner = await Task.WhenAny(all, Task.Delay(CleanupGrace)).ConfigureAwait(false);
+            if (winner != all)
+                return (false, "output drain grace expired");
+            await all.ConfigureAwait(false);
+            return (true, null);
+        }
+        catch (Exception ex)
+        {
+            return (false, $"output drain fault: {ex.Message}");
+        }
     }
 
     private static string? Correlate(ChildRequestEnvelope request, ChildResultEnvelope result)

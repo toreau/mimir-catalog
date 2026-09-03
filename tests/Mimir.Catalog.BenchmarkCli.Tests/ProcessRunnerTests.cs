@@ -174,11 +174,63 @@ public class ProcessRunnerTests
     }
 
     [Fact]
-    public void Invocation_IsStructuredArgumentsOnly()
+    public void ArgumentList_PreservesExactLiteralArguments()
     {
-        var inv = ProcessInvocation.BenchmarkChild("/tmp/bench child.exe", "/some/request file.json");
-        Assert.Equal("/tmp/bench child.exe", inv.Executable);
-        Assert.Equal(new[] { "child", "--request", "/some/request file.json" }, inv.Arguments);
-        Assert.DoesNotContain(inv.Arguments, a => a.Contains('&') || a.Contains('|') || a.Contains(';'));
+        var executable = "/tmp/bench child.exe";
+        var request = "/tmp/a path/request;&|$.json";
+        var inv = ProcessInvocation.BenchmarkChild(executable, request);
+        Assert.Equal(executable, inv.Executable);
+        // ArgumentList + UseShellExecute=false: each element must remain the exact literal string.
+        Assert.Equal(3, inv.Arguments.Count);
+        Assert.Equal("child", inv.Arguments[0]);
+        Assert.Equal("--request", inv.Arguments[1]);
+        Assert.Equal(request, inv.Arguments[2]);
+    }
+
+    [Fact]
+    public async Task MetacharacterRequestPath_ArrivesAsOneExactArgument()
+    {
+        using var f = new Fixture();
+        string weird = Path.Combine(f.Dir, "request file;&|$.json");
+        File.WriteAllText(weird, ProtocolJson.ToJson(f.Request));
+        var inv = new ProcessInvocation
+        {
+            Executable = "dotnet",
+            Arguments = new[] { "exec", f.HelperDll, "valid-result", "--request", weird },
+        };
+        var r = await ChildProcessRunner.RunAsync(inv, TimeSpan.FromSeconds(30), f.Request);
+        Assert.Equal(ProcessOutcome.CompletedProtocolResult, r.Outcome);
+        Assert.Equal(LogicalStatus.Valid, r.ParsedChildResult!.Status);
+    }
+
+    [Fact]
+    public async Task Timeout_PartialStdout_NeverBecomesProtocolResultError()
+    {
+        using var f = new Fixture();
+        var r = await Run(f, "partial-stdout-then-delay", TimeSpan.FromMilliseconds(300), "--ms", "4000");
+        Assert.Equal(ProcessOutcome.Timeout, r.Outcome);
+        Assert.True(r.TimedOut);
+        Assert.Null(r.ParsedChildResult);
+        Assert.True(r.KillAttempted);
+        Assert.Contains("protocolVersion", r.Stdout);
+        Assert.False(r.DescendantTerminationVerified);
+    }
+
+    [Fact]
+    public async Task KillFailure_RunnerLevel_TimeoutPreserved_StateExplicit()
+    {
+        using var f = new Fixture();
+        var inv = f.Invoke("delay", "--ms", "1500");
+        var r = await ChildProcessRunner.RunAsyncForTest(
+            inv, TimeSpan.FromMilliseconds(250), f.Request,
+            _ => throw new InvalidOperationException("boom kill"));
+        Assert.Equal(ProcessOutcome.Timeout, r.Outcome);
+        Assert.True(r.TimedOut);
+        Assert.True(r.KillAttempted);
+        Assert.False(r.KillCallSucceeded);
+        Assert.Contains("boom kill", r.KillError);
+        Assert.True(r.WrapperExitObserved);   // child self-exits at 1.5 s within the single cleanup budget
+        Assert.True(r.OutputDrainCompleted);
+        Assert.False(r.DescendantTerminationVerified);
     }
 }

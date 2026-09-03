@@ -58,6 +58,14 @@ public static class Program
                 Console.Error.WriteLine();
                 return 0;
             }
+            case "partial-stdout-then-delay":
+            {
+                Console.Out.Write("{\"protocolVersion\":\"mimir-catalog-benchmark-child-v1\",\"candidateId\":\"partial");
+                Console.Out.Flush();
+                int ms = ArgInt(args, "--ms", 4_000);
+                Thread.Sleep(ms);
+                return 0;
+            }
             case "delay":
             {
                 int ms = ArgInt(args, "--ms", 5_000);
