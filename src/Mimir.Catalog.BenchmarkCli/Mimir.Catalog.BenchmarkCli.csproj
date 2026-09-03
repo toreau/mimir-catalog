@@ -8,6 +8,9 @@
     <RootNamespace>Mimir.Catalog.BenchmarkCli</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="Mimir.Catalog.BenchmarkCli.Tests" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="..\Mimir.Catalog.Benchmark\Mimir.Catalog.Benchmark.csproj" />
     <ProjectReference Include="..\Mimir.Catalog.Workload\Mimir.Catalog.Workload.csproj" />
     <ProjectReference Include="..\Mimir.Catalog.Storage.Sqlite\Mimir.Catalog.Storage.Sqlite.csproj" />

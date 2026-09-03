@@ -16,5 +16,6 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Mimir.Catalog.BenchmarkCli\Mimir.Catalog.BenchmarkCli.csproj" />
+    <ProjectReference Include="..\Mimir.Catalog.BenchmarkCli.TestHelper\Mimir.Catalog.BenchmarkCli.TestHelper.csproj" />
   </ItemGroup>
 </Project>

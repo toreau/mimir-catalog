@@ -13,5 +13,6 @@
     <Project Path="tests/Mimir.Catalog.Benchmark.Tests/Mimir.Catalog.Benchmark.Tests.csproj" />
     <Project Path="tests/Mimir.Catalog.Storage.Sqlite.Tests/Mimir.Catalog.Storage.Sqlite.Tests.csproj" />
     <Project Path="tests/Mimir.Catalog.BenchmarkCli.Tests/Mimir.Catalog.BenchmarkCli.Tests.csproj" />
+    <Project Path="tests/Mimir.Catalog.BenchmarkCli.TestHelper/Mimir.Catalog.BenchmarkCli.TestHelper.csproj" />
   </Folder>
 </Solution>
