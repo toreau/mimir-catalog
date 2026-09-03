@@ -90,9 +90,9 @@ public class EvidencePromotionTests : IDisposable
     public void Readiness_RunningValid_CompleteExpectedRejects()
     {
         var (s, _) = Ready();
-        var ok = EvidenceReadinessValidator.Validate(s, "Running");
+        var ok = EvidenceReadinessValidator.Validate(s, EvidenceExpectedState.Running);
         Assert.True(ok.IsValid);
-        var wrong = EvidenceReadinessValidator.Validate(s, "Complete");
+        var wrong = EvidenceReadinessValidator.Validate(s, EvidenceExpectedState.Complete);
         Assert.False(wrong.IsValid);
         Assert.Contains(wrong.Problems, p => p.Contains("Running"));
     }
@@ -102,7 +102,7 @@ public class EvidencePromotionTests : IDisposable
     {
         var (s, _) = Ready();
         s.WriteCompleteState();
-        var ok = EvidenceReadinessValidator.Validate(s, "Complete");
+        var ok = EvidenceReadinessValidator.Validate(s, EvidenceExpectedState.Complete);
         Assert.True(ok.IsValid);
     }
 
@@ -111,7 +111,7 @@ public class EvidencePromotionTests : IDisposable
     {
         var (s, _) = Ready();
         File.WriteAllText(Path.Combine(s.StagingPath, "run.json"), "{\"broken\"");
-        var r = EvidenceReadinessValidator.Validate(s, "Running");
+        var r = EvidenceReadinessValidator.Validate(s, EvidenceExpectedState.Running);
         Assert.False(r.IsValid);
     }
 
@@ -304,4 +304,43 @@ public class EvidencePromotionTests : IDisposable
     private static EvidenceRunJson ToRunJson(RunIdentity id) => new(
         id.EvidenceSchemaVersion, id.ProtocolVersion, id.CandidateId, id.CandidateConfigId,
         id.WorkloadId, id.CorpusId, id.RunId);
+    [Fact]
+    public void Finalizer_ResultUsesReadinessFacts_NoPostRead()
+    {
+        var (session, ready) = Ready();
+        var readiness = EvidenceReadinessValidator.Validate(session, EvidenceExpectedState.Running);
+        Assert.True(readiness.IsValid);
+        Assert.Equal(readiness.RunJson, ready.RunJson); // record value equality
+        Assert.Equal(readiness.ManifestBytes, ready.ManifestBytes);
+        Assert.Equal(readiness.ManifestSha256, ready.ManifestSha256);
+        Assert.Equal(EvidenceControlWriter.Sha256(readiness.ManifestBytes!), ready.ManifestSha256);
+    }
+
+    private static void WriteState(EvidenceStagingSession session, string state, string? stage = "promote", string? reason = null, DateTime? utc = null)
+    {
+        File.WriteAllBytes(Path.Combine(session.StagingPath, "run.state.json"),
+            EvidenceState.Serialize(state, session.Identity.RunId, session.Identity.CandidateId, stage, reason, utc));
+    }
+
+    [Fact]
+    public void CompleteCanonical_PassesSemantics()
+    {
+        var (session, _) = Ready();
+        session.WriteCompleteState();
+        Assert.True(EvidenceReadinessValidator.Validate(session, EvidenceExpectedState.Complete).IsValid);
+    }
+
+    [Fact]
+    public void Complete_SemanticRejections()
+    {
+        var (session, _) = Ready();
+        WriteState(session, "Complete", stage: null, reason: null, utc: DateTime.UtcNow);
+        Assert.False(EvidenceReadinessValidator.Validate(session, EvidenceExpectedState.Complete).IsValid);
+        WriteState(session, "Complete", stage: "bogus", reason: null, utc: DateTime.UtcNow);
+        Assert.False(EvidenceReadinessValidator.Validate(session, EvidenceExpectedState.Complete).IsValid);
+        WriteState(session, "Complete", stage: "promote", reason: "why", utc: DateTime.UtcNow);
+        Assert.False(EvidenceReadinessValidator.Validate(session, EvidenceExpectedState.Complete).IsValid);
+        WriteState(session, "Complete", stage: "promote", reason: null, utc: null);
+        Assert.False(EvidenceReadinessValidator.Validate(session, EvidenceExpectedState.Complete).IsValid);
+    }
 }

@@ -20,9 +20,11 @@ public sealed class EvidenceReadinessResult
 /// finalize:registered, finalize:inventory, finalize:state,
 /// finalize:strict-validate, finalize:final-destination).
 /// </summary>
+public enum EvidenceExpectedState { Running, Complete }
+
 public static class EvidenceReadinessValidator
 {
-    public static EvidenceReadinessResult Validate(EvidenceStagingSession session, string expectedState)
+    public static EvidenceReadinessResult Validate(EvidenceStagingSession session, EvidenceExpectedState expectedState)
     {
         var problems = new List<string>();
         string staging = session.StagingPath;
@@ -75,8 +77,10 @@ public static class EvidenceReadinessValidator
             try
             {
                 var st = EvidenceState.ParseStrict(stateBytes);
-                if (st.State != expectedState)
+                if (st.State != expectedState.ToString())
                     problems.Add($"finalize:state: state must be exactly {expectedState}, found '{st.State}'");
+                if (expectedState == EvidenceExpectedState.Complete)
+                    ValidateCompleteSemantics(st, problems);
                 if (st.RunId != identity.RunId || st.CandidateId != identity.CandidateId)
                     problems.Add("finalize:state: state identity does not match session identity");
             }
@@ -150,15 +154,31 @@ public static class EvidenceReadinessValidator
         if (File.Exists(final) || Directory.Exists(final))
             problems.Add($"finalize:final-destination: final destination already exists: {final}");
 
+        bool isValid = problems.Count == 0;
+        if (isValid && (runParsed is null || manifestParsed is null || manifestBytes is null || manifestSha is null))
+        {
+            isValid = false;
+            problems.Add("finalize:strict-validate: valid readiness must expose run.json/manifest facts from current disk state");
+        }
         return new EvidenceReadinessResult
         {
-            IsValid = problems.Count == 0,
+            IsValid = isValid,
             RunJson = runParsed,
             Manifest = manifestParsed,
             ManifestBytes = manifestBytes,
             ManifestSha256 = manifestSha,
             Problems = problems,
         };
+    }
+
+    private static void ValidateCompleteSemantics(EvidenceStateSnapshot st, List<string> problems)
+    {
+        if (st.Stage != "promote")
+            problems.Add("finalize:state: Complete state must carry stage='promote'");
+        if (st.Reason is not null)
+            problems.Add("finalize:state: Complete state must not carry a reason");
+        if (st.Utc is null)
+            problems.Add("finalize:state: Complete state must carry a valid utc");
     }
 
     private static void CollectInventoryProblems(List<string> problems, EvidenceStagingSession session, TreeView tree, string[] controls)

@@ -186,50 +186,23 @@ public static class EvidenceFinalizer
         // 16. deterministic test checkpoint before the authoritative final snapshot
         hook?.Invoke(EvidenceFinalizeCheckpoint.BeforeFinalControlVerification);
 
-        // 17. shared read-only readiness gate (fresh disk facts, expected Running)
-        var readiness = EvidenceReadinessValidator.Validate(session, "Running");
+        // 17. authoritative final gate. This readiness validation is the LAST
+        // filesystem/integrity operation: its returned facts are consumed
+        // directly and no control-file read follows a valid result.
+        var readiness = EvidenceReadinessValidator.Validate(session, EvidenceExpectedState.Running);
         if (!readiness.IsValid)
             throw new FinalizeStageException("finalize:readiness", string.Join("; ", readiness.Problems));
 
-        // Re-read fresh control bytes for the result exposure only; authority is
-        // the readiness validator's fresh-disk verification above.
-        byte[] runFresh = ReadControlBytes(staging, EvidenceStagingSession.RunJsonName, "finalize:strict-validate");
-        byte[] manifestFresh = ReadControlBytes(staging, EvidenceStagingSession.ManifestName, "finalize:strict-validate");
-        EvidenceRunJson runParsedFresh;
-        try
-        {
-            runParsedFresh = EvidenceJson.ReadRunJson(runFresh);
-        }
-        catch (Exception ex)
-        {
-            throw new FinalizeStageException("finalize:strict-validate", ex.Message);
-        }
-
-        // ReadyForPromotion (in memory only; state remains Running). Manifest
-        // bytes/SHA are computed from the fresh final manifest bytes.
-        string manifestShaFinal = EvidenceControlWriter.Sha256(manifestFresh);
         return new EvidenceFinalizationResult
         {
             Status = EvidenceFinalizationStatus.ReadyForPromotion,
             StagingPath = staging,
             FinalPath = final,
-            RunJson = runParsedFresh,
-            ManifestBytes = manifestFresh,
-            ManifestSha256 = manifestShaFinal,
+            RunJson = readiness.RunJson!,
+            ManifestBytes = readiness.ManifestBytes!,
+            ManifestSha256 = readiness.ManifestSha256!,
             Problems = Array.Empty<string>(),
         };
-    }
-
-    private static byte[] ReadControlBytes(string staging, string name, string stage)
-    {
-        try
-        {
-            return File.ReadAllBytes(Path.Combine(staging, name));
-        }
-        catch (Exception ex)
-        {
-            throw new FinalizeStageException(stage, $"failed to reread {name}: {ex.Message}");
-        }
     }
 
     private static EvidenceRunJson ToRunJson(RunIdentity id) => new(

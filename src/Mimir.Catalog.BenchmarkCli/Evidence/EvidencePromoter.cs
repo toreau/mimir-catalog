@@ -50,7 +50,7 @@ public static class EvidencePromoter
         }
 
         // Pre-Complete gate: fresh Running readiness.
-        var running = EvidenceReadinessValidator.Validate(session, "Running");
+        var running = EvidenceReadinessValidator.Validate(session, EvidenceExpectedState.Running);
         if (!running.IsValid)
         {
             problems.Add("pre-Complete readiness failed: " + string.Join("; ", running.Problems));
@@ -69,7 +69,7 @@ public static class EvidencePromoter
         }
 
         // Post-Complete gate: fresh Complete readiness + final absent.
-        var complete = EvidenceReadinessValidator.Validate(session, "Complete");
+        var complete = EvidenceReadinessValidator.Validate(session, EvidenceExpectedState.Complete);
         if (!complete.IsValid)
         {
             problems.Add("post-Complete readiness failed: " + string.Join("; ", complete.Problems));
