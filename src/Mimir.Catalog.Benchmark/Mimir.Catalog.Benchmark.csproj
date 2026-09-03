@@ -4,4 +4,10 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Mimir.Catalog.Workload\Mimir.Catalog.Workload.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Mimir.Catalog.Benchmark.Tests" />
+  </ItemGroup>
 </Project>
