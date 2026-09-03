@@ -111,4 +111,99 @@ public static class GraphWorkloadLoader
         using var sha = SHA256.Create();
         return Convert.ToHexStringLower(sha.ComputeHash(fs));
     }
+
+    public static G2Workload LoadG2(string workloadDir) => LoadG2Core(workloadDir, Authoritative);
+
+    /// <summary>Internal fixture seam for G2 tests.</summary>
+    internal static G2Workload LoadG2Fixture(string workloadDir, Identity identity) => LoadG2Core(workloadDir, identity);
+
+    private static G2Workload LoadG2Core(string workloadDir, Identity id)
+    {
+        string statePath = Path.Combine(workloadDir, "workload.state.json");
+        string manifestPath = Path.Combine(workloadDir, "manifest.json");
+        string graphPath = Path.Combine(workloadDir, "graph-probes.jsonl");
+        string resultsPath = Path.Combine(workloadDir, "expected-results.jsonl");
+        foreach (var p in new[] { statePath, manifestPath, graphPath, resultsPath })
+            if (!File.Exists(p)) throw new InvalidDataException($"workload package missing {Path.GetFileName(p)}");
+
+        using (var st = JsonDocument.Parse(File.ReadAllBytes(statePath)))
+            if (!st.RootElement.TryGetProperty("state", out var s) || s.GetString() != "Complete")
+                throw new InvalidDataException("workload publication state != Complete");
+        if (Sha256(manifestPath) != id.ManifestSha) throw new InvalidDataException("authoritative manifest identity mismatch");
+        using var doc = JsonDocument.Parse(File.ReadAllBytes(manifestPath));
+        var m = doc.RootElement;
+        if ((m.TryGetProperty("workload_id", out var w) ? w.GetString() ?? "" : "") != id.WorkloadId
+            || (m.TryGetProperty("corpus_id", out var c) ? c.GetString() ?? "" : "") != id.CorpusId)
+            throw new InvalidDataException("workload manifest identity mismatch");
+
+        string graphSha = Sha256(graphPath);
+        string resultsSha = Sha256(resultsPath);
+        if (graphSha != ManifestFileSha(m, "graph-probes.jsonl") || graphSha != id.GraphSha)
+            throw new InvalidDataException("graph-probes identity mismatch");
+        if (resultsSha != ManifestFileSha(m, "expected-results.jsonl") || resultsSha != id.ResultsSha)
+            throw new InvalidDataException("expected-results identity mismatch");
+
+        // Exactly one G2 batch probe.
+        G2Concept[]? concepts = null;
+        foreach (var line in File.ReadLines(graphPath))
+        {
+            using var e = JsonDocument.Parse(line);
+            var r = e.RootElement;
+            if (r.GetProperty("op").GetString() != "G2") continue;
+            if (concepts != null) throw new InvalidDataException("multiple G2 batch probes");
+            if (r.GetProperty("stratum").GetString() != "Batch") throw new InvalidDataException("G2 probe must be Batch");
+            if (!r.TryGetProperty("measured", out var mm) || !mm.GetBoolean()) throw new InvalidDataException("G2 batch probe must be measured=true");
+            if (r.TryGetProperty("seq", out var seq) && seq.GetInt64() != 500) throw new InvalidDataException("G2 batch probe seq must be 500");
+            var arr = new List<G2Concept>();
+            foreach (var cc in r.GetProperty("concepts").EnumerateArray())
+                arr.Add(new G2Concept(cc.GetProperty("qid").GetInt64(), cc.GetProperty("source_stratum").GetString() ?? ""));
+            concepts = arr.ToArray();
+        }
+        if (concepts == null) throw new InvalidDataException("G2 batch probe missing");
+        if (concepts.Length != 200) throw new InvalidDataException($"G2 concept count {concepts.Length} != 200");
+        if (concepts.Select(c => c.Qid).Distinct().Count() != 200) throw new InvalidDataException("G2 concepts not unique");
+        if (concepts.Count(c => c.SourceStratum == "P31Degree1") != 100
+            || concepts.Count(c => c.SourceStratum == "P31Degree2Plus") != 100)
+            throw new InvalidDataException("G2 stratum composition must be 100 P31Degree1 / 100 P31Degree2Plus");
+
+        // Expected rows.
+        var perInput = new List<G2PerInputExpected>();
+        G2BatchExpected? batch = null;
+        var seen = new HashSet<int>();
+        foreach (var line in File.ReadLines(resultsPath))
+        {
+            using var e = JsonDocument.Parse(line);
+            var r = e.RootElement;
+            if (r.GetProperty("op").GetString() != "G2") continue;
+            string kind = r.GetProperty("kind").GetString() ?? "";
+            if (!r.TryGetProperty("seq", out var seq) || seq.GetInt64() != 500) throw new InvalidDataException("G2 expected seq must be 500");
+            if (kind == "PerInput")
+            {
+                int item = r.GetProperty("item").GetInt32();
+                if (!seen.Add(item)) throw new InvalidDataException($"duplicate G2 PerInput item {item}");
+                if (r.TryGetProperty("measured", out var mm) && mm.GetBoolean()) throw new InvalidDataException("G2 PerInput must be measured=false");
+                perInput.Add(new G2PerInputExpected(item,
+                    r.GetProperty("qid").GetInt64(),
+                    r.GetProperty("source_stratum").GetString() ?? "",
+                    r.GetProperty("cardinality").GetInt64(),
+                    r.GetProperty("digest").GetString() ?? ""));
+            }
+            else if (kind == "Batch")
+            {
+                if (batch != null) throw new InvalidDataException("duplicate G2 Batch expected");
+                if (!r.TryGetProperty("measured", out var mm) || !mm.GetBoolean()) throw new InvalidDataException("G2 Batch must be measured=true");
+                batch = new G2BatchExpected(r.GetProperty("cardinality").GetInt64(), r.GetProperty("digest").GetString() ?? "");
+            }
+        }
+        if (batch == null) throw new InvalidDataException("G2 Batch expected missing");
+        if (perInput.Count != 200) throw new InvalidDataException($"G2 PerInput expected count {perInput.Count} != 200");
+        var ordered = perInput.OrderBy(p => p.Item).ToArray();
+        for (int i = 0; i < 200; i++)
+        {
+            if (ordered[i].Item != i) throw new InvalidDataException("G2 PerInput items must be exactly 0..199");
+            if (ordered[i].Qid != concepts[i].Qid) throw new InvalidDataException($"positional QID mismatch at item {i}");
+            if (ordered[i].SourceStratum != concepts[i].SourceStratum) throw new InvalidDataException($"positional source mismatch at item {i}");
+        }
+        return new G2Workload { Concepts = concepts, PerInput = ordered, Batch = batch };
+    }
 }

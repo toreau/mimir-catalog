@@ -30,3 +30,47 @@ public sealed class G1Result
     public string? ActualDigest { get; init; }
     public string? ErrorMessage { get; init; }
 }
+
+// ---- G2 composition models ----
+public sealed record G2Concept(long Qid, string SourceStratum);
+
+public sealed record G2PerInputExpected(int Item, long Qid, string SourceStratum, long Cardinality, string Digest);
+
+public sealed record G2BatchExpected(long Cardinality, string Digest);
+
+public sealed class G2Workload
+{
+    public required IReadOnlyList<G2Concept> Concepts { get; init; }
+    public required IReadOnlyList<G2PerInputExpected> PerInput { get; init; } // positional (item == index)
+    public required G2BatchExpected Batch { get; init; }
+}
+
+public sealed class G2PerInputExecutionOutcome
+{
+    public required int Item { get; init; }
+    public required long Qid { get; init; }
+    public required string SourceStratum { get; init; }
+    public long[]? StructuralQidsAscending { get; init; }
+    public string? ErrorMessage { get; init; }
+}
+
+public sealed class G2PerInputResult
+{
+    public required int Item { get; init; }
+    public required long Qid { get; init; }
+    public required string SourceStratum { get; init; }
+    public required string Status { get; init; }
+    public long? ExpectedCardinality { get; init; }
+    public long? ActualCardinality { get; init; }
+    public string? ExpectedDigest { get; init; }
+    public string? ActualDigest { get; init; }
+    public string? ErrorMessage { get; init; }
+}
+
+public sealed class G2BatchResult
+{
+    public required string Status { get; init; }
+    public long? ActualCardinality { get; init; }
+    public string? ActualDigest { get; init; }
+    public string? ErrorMessage { get; init; }
+}

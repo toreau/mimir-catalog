@@ -132,4 +132,33 @@ public static class WorkloadOracle
     /// <summary>Digest of an analytical result over canonical sorted rows (A2/A3/A4/A5).</summary>
     public static string AnalyticalRowsDigest(IReadOnlyList<byte[]> rowsInCanonicalOrder)
         => SizedRowsDigest(rowsInCanonicalOrder);
+
+    /// <summary>
+    /// Frozen G2 batch digest: for each input in supplied positional order,
+    /// canonical row = [qid][structural set length][each structural QID
+    /// ascending]; raw rows concatenated in order; SHA-256. No item,
+    /// source-stratum or digest strings are part of the encoding.
+    /// </summary>
+    public static string G2BatchDigest(IReadOnlyList<(long Qid, long[] StructuralQidsAscending)> rows)
+    {
+        var parts = new byte[rows.Count][];
+        for (int i = 0; i < rows.Count; i++)
+        {
+            var (qid, set) = rows[i];
+            var b = new Canon.Builder();
+            b.AddLong(qid).AddLong(set.Length);
+            foreach (long q in set) b.AddLong(q);
+            parts[i] = b.ToArray();
+        }
+        long total = 0;
+        foreach (var p in parts) total += p.Length;
+        var buf = new byte[total];
+        long at = 0;
+        foreach (var p in parts)
+        {
+            Array.Copy(p, 0, buf, at, p.Length);
+            at += p.Length;
+        }
+        return Canon.Sha256Hex(buf);
+    }
 }
