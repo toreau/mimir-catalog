@@ -74,15 +74,14 @@ public static class SqliteCandidateSchema
         cmd.ExecuteNonQuery();
     }
 
+    /// <summary>Single DDL source for the four frozen indexes.</summary>
+    public static string IndexesDdl => string.Join(";",
+        Indexes.Select(i => $"CREATE INDEX {i.Name} ON {i.Table} ({string.Join(", ", i.Columns)})"));
+
     public static void CreateIndexes(SqliteConnection conn)
     {
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            CREATE INDEX lex_lang_value ON lexical_entry (Lang COLLATE BINARY, Value COLLATE BINARY);
-            CREATE INDEX lex_qid ON lexical_entry (Qid, Lang COLLATE BINARY, LexKind COLLATE BINARY);
-            CREATE INDEX inst_subject ON instance_of (SubjectQid, TargetQid);
-            CREATE INDEX sub_subject ON subclass_of (SubjectQid, TargetQid);
-            """;
+        cmd.CommandText = IndexesDdl;
         cmd.ExecuteNonQuery();
     }
 

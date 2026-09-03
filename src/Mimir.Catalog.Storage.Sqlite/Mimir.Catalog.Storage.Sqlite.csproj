@@ -6,9 +6,13 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.11" />
+    <PackageReference Include="Parquet.Net" Version="6.1.0" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Mimir.Catalog.Benchmark\Mimir.Catalog.Benchmark.csproj" />
     <ProjectReference Include="..\Mimir.Catalog.Workload\Mimir.Catalog.Workload.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Mimir.Catalog.Storage.Sqlite.Tests" />
   </ItemGroup>
 </Project>
