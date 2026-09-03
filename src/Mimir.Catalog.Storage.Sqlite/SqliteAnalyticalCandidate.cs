@@ -73,10 +73,41 @@ public sealed class SqliteAnalyticalCandidate : IAnalyticalCandidate
         while (reader.Read()) yield return new EdgeRow(reader.GetInt64(0), reader.GetInt64(1));
     }
 
-    public IReadOnlyList<(string Lang, string LexKind, long Count)> A2LangKindCounts() => throw new NotSupportedException("A2 belongs to 4c.3b");
-    public IReadOnlyList<(long TargetQid, long Count)> A3P31Fanout() => throw new NotSupportedException("A3 belongs to 4c.3b");
-    public IReadOnlyList<(long TargetQid, long Count)> A4P279Fanout() => throw new NotSupportedException("A4 belongs to 4c.3b");
-    public IReadOnlyList<A5Row> A5P31TargetLabels() => throw new NotSupportedException("A5 belongs to 4c.3b");
+    public IReadOnlyList<(string Lang, string LexKind, long Count)> A2LangKindCounts()
+    {
+        using var cmd = Require().CreateCommand();
+        cmd.CommandText = "SELECT Lang, LexKind, COUNT(*) FROM lexical_entry GROUP BY Lang, LexKind";
+        var list = new List<(string, string, long)>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+            list.Add((reader.GetString(0), reader.GetString(1), reader.GetInt64(2)));
+        return list;
+    }
+
+    public IReadOnlyList<(long TargetQid, long Count)> A3P31Fanout()
+    {
+        using var cmd = Require().CreateCommand();
+        cmd.CommandText = "SELECT TargetQid, COUNT(*) FROM instance_of GROUP BY TargetQid";
+        return ReadTargetCounts(cmd);
+    }
+
+    public IReadOnlyList<(long TargetQid, long Count)> A4P279Fanout()
+    {
+        using var cmd = Require().CreateCommand();
+        cmd.CommandText = "SELECT TargetQid, COUNT(*) FROM subclass_of GROUP BY TargetQid";
+        return ReadTargetCounts(cmd);
+    }
+
+    private static IReadOnlyList<(long TargetQid, long Count)> ReadTargetCounts(SqliteCommand cmd)
+    {
+        var list = new List<(long, long)>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+            list.Add((reader.GetInt64(0), reader.GetInt64(1)));
+        return list;
+    }
+
+    public IReadOnlyList<A5Row> A5P31TargetLabels() => throw new NotSupportedException("A5 belongs to a later slice");
 
     public void Dispose()
     {

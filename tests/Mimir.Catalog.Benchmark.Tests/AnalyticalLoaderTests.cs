@@ -45,26 +45,31 @@ public class AnalyticalLoaderTests
 
     private static string Std()
     {
-        var d = new[] { "a", "b", "c", "d" };
-        var ops = new[] { "A1-Concept", "A1-LexicalEntry", "A1-InstanceOf", "A1-SubclassOf" };
-        return string.Join("\n", ops.Select((o, i) => Line(o, i + 1, d[i].PadRight(64, d[i][0]))));
+        var d = new[] { "a", "b", "c", "d", "e", "f", "0" };
+        var ops = new[] { "A1-Concept", "A1-LexicalEntry", "A1-InstanceOf", "A1-SubclassOf", "A2", "A3", "A4" };
+        return string.Join("\n", ops.Select((o, i) => Line(o, i + 1, d[i].PadRight(64, d[i][0]))))
+            + "\n" + Line("A5", 9, "9".PadRight(64, '9'));
     }
 
     [Fact]
-    public void Loader_SelectsExactlyFourA1()
+    public void Loader_SelectsA1ThroughA4_AndIgnoresA5()
     {
         using var f = new Fixture();
         f.Write(Std());
         var w = f.Load();
-        Assert.Equal(4, w.Expected.Count);
+        Assert.Equal(7, w.Expected.Count);
         Assert.Equal(4, w.Expected.Keys.Count(o => o.StartsWith("A1-", StringComparison.Ordinal)));
+        Assert.Contains("A2", w.Expected.Keys);
+        Assert.Contains("A3", w.Expected.Keys);
+        Assert.Contains("A4", w.Expected.Keys);
+        Assert.DoesNotContain("A5", w.Expected.Keys);
     }
 
     [Fact]
     public void Loader_Rejects_MissingDuplicateExtraAndBadIdentity()
     {
         using var f = new Fixture();
-        f.Write(Std().Split('\n').Skip(1).ToArray().Length == 3 ? string.Join("\n", Std().Split('\n').Skip(1)) : Std());
+        f.Write(string.Join("\n", Std().Split('\n').Skip(1)));
         Assert.Throws<InvalidDataException>(() => f.Load());
 
         using var f2 = new Fixture();
@@ -72,9 +77,8 @@ public class AnalyticalLoaderTests
         Assert.Throws<InvalidDataException>(() => f2.Load());
 
         using var f3 = new Fixture();
-        // Non-A1 rows are legitimately ignored (file also carries graph/serving rows upstream).
         f3.Write(Std() + "\n" + Line("A2", 5, "f"));
-        Assert.Equal(4, f3.Load().Expected.Count);
+        Assert.Throws<InvalidDataException>(() => f3.Load()); // duplicate A2
 
         using var f4 = new Fixture();
         f4.Write(Std());

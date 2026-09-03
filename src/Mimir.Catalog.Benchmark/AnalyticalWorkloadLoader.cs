@@ -15,7 +15,7 @@ public static class AnalyticalWorkloadLoader
     public const string ExpectedManifestSha = "02ca19be526ad76d42b4681d6680d899aa51f99f8eed755333dfdec366f5776e";
     public const string ExpectedAnalyticalSha = "d5f2fc916c7ffe4b1e68821bde6b914df6cc013500b22b2bc04f2f0ca402bbef";
 
-    private static readonly string[] A1Ops = ["A1-Concept", "A1-LexicalEntry", "A1-InstanceOf", "A1-SubclassOf"];
+    private static readonly string[] LoadedOps = ["A1-Concept", "A1-LexicalEntry", "A1-InstanceOf", "A1-SubclassOf", "A2", "A3", "A4"];
 
     internal sealed record Identity(string ManifestSha, string WorkloadId, string CorpusId, string AnalyticalSha);
 
@@ -55,13 +55,13 @@ public static class AnalyticalWorkloadLoader
         {
             using var e = JsonDocument.Parse(line);
             string op = e.RootElement.GetProperty("op").GetString()!;
-            if (!A1Ops.Contains(op, StringComparer.Ordinal)) continue;
+            if (!LoadedOps.Contains(op, StringComparer.Ordinal)) continue; // A5 and other rows ignored by this authority path
             if (!expected.TryAdd(op, new A1Expected(op,
                     e.RootElement.GetProperty("cardinality").GetInt64(),
                     e.RootElement.GetProperty("digest").GetString() ?? "")))
                 throw new InvalidDataException($"duplicate A1 operation {op}");
         }
-        if (expected.Count != 4) throw new InvalidDataException("analytical-expected must contain exactly the four A1 operations");
+        if (expected.Count != 7) throw new InvalidDataException("analytical-expected must contain exactly the four A1 and A2/A3/A4 operations");
 
         return new AnalyticalWorkload { Expected = expected };
     }

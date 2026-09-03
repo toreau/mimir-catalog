@@ -80,3 +80,55 @@ public class SqliteAnalyticalCandidateTests : IDisposable
         Assert.All(results, r => Assert.Equal(ServingStatuses.Valid, r.Status));
     }
 }
+
+public class SqliteGroupedTests : IDisposable
+{
+    private readonly string _db;
+    private readonly SqliteConnection _conn;
+
+    public SqliteGroupedTests()
+    {
+        _db = Path.Combine(Path.GetTempPath(), "mimir-ag-" + Guid.NewGuid().ToString("N") + ".db");
+        _conn = new SqliteConnection($"Data Source={_db}");
+        _conn.Open();
+        SqliteCandidateSchema.ApplyBuildPragmas(_conn);
+        SqliteCandidateSchema.CreateSchema(_conn);
+        SqliteCandidateSchema.CreateIndexes(_conn);
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO concept (Qid,InT1,InT2) VALUES (1,1,0),(2,0,1);
+            INSERT INTO lexical_entry (Qid,Lang,LexKind,Value) VALUES (1,'en','label','a'),(2,'en','label','b');
+            INSERT INTO instance_of (SubjectQid,TargetQid) VALUES (1,5),(1,5);
+            INSERT INTO subclass_of (SubjectQid,TargetQid) VALUES (1,10),(2,20);
+            """;
+        cmd.ExecuteNonQuery();
+    }
+
+    public void Dispose()
+    {
+        _conn.Dispose();
+        try { File.Delete(_db); } catch { }
+    }
+
+    [Fact]
+    public void A2_A3_A4_MaterializedGrouped_LongCounts()
+    {
+        using var a = new SqliteAnalyticalCandidate(_db);
+        a.Open();
+        var a2 = a.A2LangKindCounts();
+        Assert.Single(a2);
+        Assert.Equal("en", a2[0].Lang);
+        Assert.Equal("label", a2[0].LexKind);
+        Assert.Equal(2L, a2[0].Count); // COUNT(*) read as Int64
+
+        var a3 = a.A3P31Fanout();
+        Assert.Single(a3);
+        Assert.Equal(5L, a3[0].TargetQid);
+        Assert.Equal(2L, a3[0].Count); // source duplicates aggregated
+
+        var a4 = a.A4P279Fanout();
+        Assert.Equal(2, a4.Count);
+        Assert.Equal(10L, a4[0].TargetQid);
+        Assert.Equal(1L, a4[0].Count);
+    }
+}

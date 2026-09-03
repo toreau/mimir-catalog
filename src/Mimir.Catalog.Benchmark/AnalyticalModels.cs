@@ -31,3 +31,15 @@ public sealed class A1Result
     public string? ActualDigest { get; init; }
     public string? ErrorMessage { get; init; }
 }
+
+/// <summary>A2-A4 grouped relational result (count is Int64 end-to-end).</summary>
+public sealed class A2A4Result
+{
+    public required string Operation { get; init; }
+    public required string Status { get; init; }
+    public long? ExpectedRowCount { get; init; }
+    public long? ActualRowCount { get; init; }
+    public string? ExpectedDigest { get; init; }
+    public string? ActualDigest { get; init; }
+    public string? ErrorMessage { get; init; }
+}
