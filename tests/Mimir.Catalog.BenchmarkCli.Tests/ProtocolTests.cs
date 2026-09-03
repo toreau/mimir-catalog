@@ -50,17 +50,44 @@ public class ProtocolTests
     }
 
     [Theory]
-    [InlineData("Valid")]
-    [InlineData("Invalid")]
-    [InlineData("Error")]
-    public void Result_Status_SerializesExactly(string status)
+    [InlineData(LogicalStatus.Valid, "VALID")]
+    [InlineData(LogicalStatus.Invalid, "INVALID")]
+    [InlineData(LogicalStatus.Error, "ERROR")]
+    public void Result_Status_WireValues_ExactUppercase(LogicalStatus status, string wire)
     {
-        var s = Enum.Parse<LogicalStatus>(status);
-        var r = Result(s);
+        var r = Result(status);
         string json = ProtocolJson.ToJson(r);
-        Assert.Contains($"\"status\":\"{status}\"", json);
+        Assert.Contains($"\"status\":\"{wire}\"", json);
         var back = ProtocolJson.DeserializeStrict<ChildResultEnvelope>(Encoding.UTF8.GetBytes(json));
-        Assert.Equal(s, back.Status);
+        Assert.Equal(status, back.Status);
+    }
+
+    [Theory]
+    [InlineData(3)]
+    [InlineData(999)]
+    public void NumericWorkloadClass_Rejected(int numeric)
+    {
+        Assert.ThrowsAny<JsonException>(() =>
+            ProtocolJson.DeserializeStrict<ChildRequestEnvelope>(Encoding.UTF8.GetBytes(
+                ProtocolJson.ToJson(ValidRequest()).Replace("\"Analytical\"", numeric.ToString()))));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void NumericLogicalStatus_Rejected(int numeric)
+    {
+        string json = ProtocolJson.ToJson(Result(LogicalStatus.Valid)).Replace("\"VALID\"", numeric.ToString());
+        Assert.ThrowsAny<JsonException>(() =>
+            ProtocolJson.DeserializeStrict<ChildResultEnvelope>(Encoding.UTF8.GetBytes(json)));
+    }
+
+    [Fact]
+    public void EmptyRunId_Rejected()
+    {
+        var r = ValidRequest();
+        r.RunId = "";
+        Assert.Contains(ChildRequestValidator.Validate(r), e => e.Contains("RunId must be non-empty"));
     }
 
     [Fact]

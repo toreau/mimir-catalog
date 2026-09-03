@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using Mimir.Catalog.Storage.Sqlite;
 
 namespace Mimir.Catalog.BenchmarkCli.Protocol;
@@ -40,8 +41,11 @@ public enum WorkloadClass
 /// </summary>
 public enum LogicalStatus
 {
+    [JsonStringEnumMemberName("VALID")]
     Valid,
+    [JsonStringEnumMemberName("INVALID")]
     Invalid,
+    [JsonStringEnumMemberName("ERROR")]
     Error,
 }
 

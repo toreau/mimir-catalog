@@ -11,7 +11,7 @@ public static class ProtocolJson
         WriteIndented = false,
         AllowTrailingCommas = false,
         ReadCommentHandling = JsonCommentHandling.Disallow,
-        Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter(namingPolicy: null) },
+        Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter(namingPolicy: null, allowIntegerValues: false) },
     };
 
     /// <summary>Serializes exactly one JSON document (no trailing content).</summary>

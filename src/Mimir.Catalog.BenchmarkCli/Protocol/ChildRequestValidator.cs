@@ -30,6 +30,7 @@ public static class ChildRequestValidator
         Require(r.CorpusId, nameof(r.CorpusId), errors);
         Require(r.CandidatePath, nameof(r.CandidatePath), errors);
         Require(r.WorkloadPath, nameof(r.WorkloadPath), errors);
+        Require(r.RunId, nameof(r.RunId), errors);
         if (r.Operation is null or "") errors.Add("operation must not be empty");
         if (r.Repetition <= 0) errors.Add("repetition must be positive");
         if (r.CandidateId != CandidateAIdentity.CandidateId)
