@@ -1,0 +1,8 @@
+bin/
+obj/
+data/
+*.sqlite
+*.sqlite-*
+*.duckdb
+*.parquet
+nohup.out

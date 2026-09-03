@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Mimir.Catalog.Corpus/Mimir.Catalog.Corpus.csproj" />
+    <Project Path="src/Mimir.Catalog.CorpusCli/Mimir.Catalog.CorpusCli.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Mimir.Catalog.Corpus.Tests/Mimir.Catalog.Corpus.Tests.csproj" />
+  </Folder>
+</Solution>
