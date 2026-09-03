@@ -173,12 +173,8 @@ public static class EvidenceReadinessValidator
 
     private static void ValidateCompleteSemantics(EvidenceStateSnapshot st, List<string> problems)
     {
-        if (st.Stage != "promote")
-            problems.Add("finalize:state: Complete state must carry stage='promote'");
-        if (st.Reason is not null)
-            problems.Add("finalize:state: Complete state must not carry a reason");
-        if (st.Utc is null)
-            problems.Add("finalize:state: Complete state must carry a valid utc");
+        foreach (var detail in EvidenceIntegrityChecks.CompleteStateProblems(st))
+            problems.Add("finalize:state: " + detail);
     }
 
     private static void CollectInventoryProblems(List<string> problems, EvidenceStagingSession session, TreeView tree, string[] controls)
@@ -206,61 +202,27 @@ public static class EvidenceReadinessValidator
 
     private static void ValidateRunIdentity(RunIdentity identity, EvidenceRunJson run, List<string> problems)
     {
-        var mismatches = new List<string>();
-        if (run.EvidenceSchemaVersion != EvidenceSchema.Version || identity.EvidenceSchemaVersion != EvidenceSchema.Version)
-            mismatches.Add("evidence_schema_version");
-        if (run.ProtocolVersion != identity.ProtocolVersion) mismatches.Add("protocol_version");
-        if (run.CandidateId != identity.CandidateId) mismatches.Add("candidate_id");
-        if (run.CandidateConfigId != identity.CandidateConfigId) mismatches.Add("candidate_config_id");
-        if (run.WorkloadId != identity.WorkloadId) mismatches.Add("workload_id");
-        if (run.CorpusId != identity.CorpusId) mismatches.Add("corpus_id");
-        if (run.RunId != identity.RunId) mismatches.Add("run_id");
-        if (mismatches.Count > 0)
-            problems.Add("finalize:strict-validate: run.json identity mismatch: " + string.Join(", ", mismatches));
+        string mismatch = EvidenceIntegrityChecks.RunIdentityMismatch(identity, run);
+        if (mismatch.Length > 0)
+            problems.Add("finalize:strict-validate: " + mismatch);
     }
 
     private static void ValidateManifestIdentity(RunIdentity identity, EvidenceManifest manifest, List<string> problems)
     {
-        if (manifest.EvidenceSchemaVersion != EvidenceSchema.Version
-            || manifest.CandidateId != identity.CandidateId
-            || manifest.CandidateConfigId != identity.CandidateConfigId
-            || manifest.WorkloadId != identity.WorkloadId
-            || manifest.CorpusId != identity.CorpusId
-            || manifest.RunId != identity.RunId)
-            problems.Add("finalize:strict-validate: manifest identity does not match session identity");
+        string mismatch = EvidenceIntegrityChecks.ManifestIdentityMismatch(identity, manifest);
+        if (mismatch.Length > 0)
+            problems.Add("finalize:strict-validate: " + mismatch);
     }
 
     private static void ValidateManifestSemantics(EvidenceStagingSession session, EvidenceManifest manifest, string? runSha, List<string> problems)
     {
+        _ = runSha; // run.json entry cross-checked against fresh disk later
+        foreach (var detail in EvidenceIntegrityChecks.ManifestStructuralProblems(manifest))
+            problems.Add("finalize:strict-validate: " + detail);
+
         var registered = session.RegisteredArtifacts;
         var expected = registered.Select(e => e.RelativePath).Append(EvidenceStagingSession.RunJsonName).ToHashSet(StringComparer.Ordinal);
-        var actual = new HashSet<string>(StringComparer.Ordinal);
-        string? prev = null;
-        int runJsonEntries = 0;
-        foreach (var a in manifest.Artifacts)
-        {
-            if (!EvidencePathSafety.TryValidateArtifactPath(a.RelativePath, out _))
-            {
-                problems.Add($"finalize:strict-validate: invalid artifact path '{a.RelativePath}'");
-                continue;
-            }
-            if (a.RelativePath == EvidenceStagingSession.StateFileName || a.RelativePath == EvidenceStagingSession.ManifestName)
-                problems.Add($"finalize:strict-validate: reserved control entry '{a.RelativePath}'");
-            if (a.RelativePath == EvidenceStagingSession.RunJsonName) runJsonEntries++;
-            if (a.RelativePath == EvidenceStagingSession.RunJsonName && runSha is not null && (a.Bytes != -1 || a.Sha256 != runSha))
-            {
-                // bytes/hash cross-checked against fresh disk below; grammar first
-            }
-            if (!actual.Add(a.RelativePath)) problems.Add($"finalize:strict-validate: duplicate artifact '{a.RelativePath}'");
-            if (prev is not null && string.CompareOrdinal(prev, a.RelativePath) >= 0)
-                problems.Add("finalize:strict-validate: manifest artifacts not strictly ordinal-sorted");
-            prev = a.RelativePath;
-            if (a.Bytes < 0) problems.Add("finalize:strict-validate: negative artifact bytes");
-            if (!EvidenceJson.IsValidSha256(a.Sha256))
-                problems.Add($"finalize:strict-validate: malformed sha256 for '{a.RelativePath}'");
-        }
-        if (runJsonEntries != 1)
-            problems.Add("finalize:strict-validate: manifest must contain exactly one run.json entry");
+        var actual = manifest.Artifacts.Select(a => a.RelativePath).ToHashSet(StringComparer.Ordinal);
         if (!actual.SetEquals(expected))
             problems.Add("finalize:strict-validate: manifest artifact set does not equal registered + run.json");
         foreach (var e in registered)
