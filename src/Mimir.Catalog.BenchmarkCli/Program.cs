@@ -66,6 +66,8 @@ public static class Program
 
         if (request.WorkloadClass == WorkloadClass.Serving)
             return RunServingChild(request, requestPath);
+        if (request.WorkloadClass == WorkloadClass.G1)
+            return RunG1Child(request, requestPath);
 
         // Placeholder: other workload classes are implemented in later sub-slices.
         // No benchmark ERROR result is fabricated; no result document is emitted.
@@ -175,6 +177,109 @@ public static class Program
         };
         ProtocolJson.WriteSingleDocument(Console.Out, result);
         return ProtocolExitCodes.ValidProtocolResult;
+    }
+
+    private static int RunG1Child(ChildRequestEnvelope request, string requestPath)
+        => RunG1ChildCore(
+            request,
+            requestPath,
+            dir => GraphWorkloadLoader.Load(dir),
+            () => new SqliteStorageCandidate(request.CandidatePath));
+
+    /// <summary>
+    /// Internal composition seam: production uses GraphWorkloadLoader.Load and
+    /// SqliteStorageCandidate; tests inject fixture loader/candidate while still
+    /// exercising the exact production artifact/envelope code paths.
+    /// </summary>
+    internal static int RunG1ChildCore(
+        ChildRequestEnvelope request,
+        string requestPath,
+        Func<string, GraphWorkload> workloadLoader,
+        Func<IStorageCandidate> candidateFactory)
+    {
+        if (request.Operation != "G1")
+        {
+            Console.Error.WriteLine($"child: G1 operation must be G1, got '{request.Operation}'");
+            return ProtocolExitCodes.FatalProtocolError;
+        }
+
+        GraphWorkload workload;
+        try
+        {
+            workload = workloadLoader(request.WorkloadPath);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"child: workload load failure: {ex.Message}");
+            return ProtocolExitCodes.FatalProtocolError;
+        }
+
+        string artifactPath = G1ArtifactPath(requestPath);
+
+        G1TimingExecution execution;
+        try
+        {
+            using IStorageCandidate candidate = candidateFactory();
+            candidate.Open();
+            execution = new G1TimingRunner(candidate, workload, request.Repetition).Execute();
+        }
+        catch (Exception ex)
+        {
+            execution = new G1TimingExecution
+            {
+                Repetition = request.Repetition,
+                Correctness = ServingStatuses.Error,
+                Samples = Array.Empty<G1TimedSample>(),
+                TimedPassWallSeconds = null,
+                ErrorCategory = "runtime",
+                ErrorMessage = ex.Message,
+            };
+            Console.Error.WriteLine($"child: G1 execution failure: {ex.Message}");
+        }
+
+        try
+        {
+            G1SampleArtifact.WriteCreateNew(artifactPath, execution.Samples);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"child: failed to write G1 sample artifact: {ex.Message}");
+            return ProtocolExitCodes.FatalProtocolError;
+        }
+
+        LogicalStatus status = execution.Correctness switch
+        {
+            ServingStatuses.Valid => LogicalStatus.Valid,
+            ServingStatuses.Invalid => LogicalStatus.Invalid,
+            _ => LogicalStatus.Error,
+        };
+        var result = new ChildResultEnvelope
+        {
+            ProtocolVersion = request.ProtocolVersion,
+            CandidateId = request.CandidateId,
+            CandidateConfigId = request.CandidateConfigId,
+            WorkloadId = request.WorkloadId,
+            CorpusId = request.CorpusId,
+            WorkloadClass = request.WorkloadClass,
+            Operation = "G1",
+            Repetition = request.Repetition,
+            Status = status,
+            CorrectnessStatus = execution.Correctness,
+            WallSeconds = execution.TimedPassWallSeconds,
+            ResultCardinality = null,
+            ResultDigest = null,
+            ErrorCategory = status == LogicalStatus.Error ? execution.ErrorCategory : null,
+            ErrorMessage = status == LogicalStatus.Error ? execution.ErrorMessage : null,
+        };
+        ProtocolJson.WriteSingleDocument(Console.Out, result);
+        return ProtocolExitCodes.ValidProtocolResult;
+    }
+
+    internal static string G1ArtifactPath(string requestPath)
+    {
+        string dir = Path.GetDirectoryName(requestPath) ?? ".";
+        string name = Path.GetFileNameWithoutExtension(requestPath);
+        return Path.Combine(dir, name + ".g1-samples.jsonl");
     }
 
     internal static string ServingArtifactPath(string requestPath)
