@@ -136,6 +136,10 @@ public static class G1CrossSummaryCalculator
         {
             int op = OpRank(a.Operation).CompareTo(OpRank(b.Operation));
             if (op != 0) return op;
+            // Total ordering: after G1-first, unknown operation names sort
+            // ordinally (never treated as equal regardless of stratum/etc).
+            int opName = StringComparer.Ordinal.Compare(a.Operation, b.Operation);
+            if (opName != 0) return opName;
             int str = StringComparer.Ordinal.Compare(a.Stratum, b.Stratum);
             if (str != 0) return str;
             int rep = (a.Repetition ?? int.MinValue).CompareTo(b.Repetition ?? int.MinValue);

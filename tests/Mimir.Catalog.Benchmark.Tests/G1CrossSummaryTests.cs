@@ -238,6 +238,77 @@ public class G1CrossSummaryTests
     }
 
     [Fact]
+    public void UnknownOperations_SortOrdinally_RegardlessOfInputOrder()
+    {
+        var workload = Workload("Degree1");
+        var valid = new[] { ValidRep("Degree1", 1, 10), ValidRep("Degree1", 2, 20), ValidRep("Degree1", 3, 30) };
+        var zzz = Unknown("ZZZ", "Bogus", 1);
+        var aaa = Unknown("AAA", "Bogus", 1);
+        var result = G1CrossSummaryCalculator.Calculate(workload, valid.Concat(new[] { zzz, aaa }).ToArray());
+        var ops = result.IntegrityProblems.Select(p => p.Operation).Where(o => o != "G1").ToList();
+        Assert.Equal(new[] { "AAA", "ZZZ" }, ops);
+        Assert.True(result.G1ComparisonReady); // expected matrix untouched
+    }
+
+    [Fact]
+    public void InputPermutation_DoesNotChangeProblemOrdering()
+    {
+        var workload = Workload("Degree1");
+        var valid = new[] { ValidRep("Degree1", 1, 10), ValidRep("Degree1", 2, 20), ValidRep("Degree1", 3, 30) };
+        var aaa = Unknown("AAA", "Bogus", 1);
+        var zzz = Unknown("ZZZ", "Bogus", 1);
+
+        IEnumerable<(string, string, int, G1CrossIntegrityCode)> Keys(G1CrossCalculationResult r)
+            => r.IntegrityProblems.Select(p => (p.Operation, p.Stratum, p.Repetition ?? -1, p.Code));
+
+        var first = G1CrossSummaryCalculator.Calculate(workload, valid.Concat(new[] { aaa, zzz }).ToArray());
+        var second = G1CrossSummaryCalculator.Calculate(workload, valid.Concat(new[] { zzz, aaa }).ToArray());
+        Assert.Equal(Keys(first), Keys(second));
+    }
+
+    [Fact]
+    public void G1Problems_SortBeforeUnknownOperations()
+    {
+        var workload = Workload("Degree1");
+        var valid = new[] { ValidRep("Degree1", 1, 10), ValidRep("Degree1", 2, 20) }; // missing rep 3 -> G1 problem
+        var result = G1CrossSummaryCalculator.Calculate(workload, valid.Concat(new[] { Unknown("ZZZ", "Bogus", 1), Unknown("AAA", "Bogus", 1) }).ToArray());
+        var ops = result.IntegrityProblems.Select(p => p.Operation).ToList();
+        Assert.True(ops.IndexOf("G1") < ops.IndexOf("AAA"));
+        Assert.True(ops.IndexOf("AAA") < ops.IndexOf("ZZZ"));
+    }
+
+    [Fact]
+    public void SubordinateOrdering_StrataOrdinal_Remains()
+    {
+        // Same G1 operation; expected groups Degree1/Degree2Plus both miss rep 2,
+        // so stratum ordinal determines ordering for otherwise-equal problems.
+        var probes = new List<GraphProbe>
+        {
+            new("G1", 0, "Degree2Plus", true, 1000),
+            new("G1", 1, "Degree1", true, 1001),
+        };
+        var expected = new Dictionary<(string, long), GraphExpected>
+        {
+            [("G1", 0L)] = new("G1", 0, true, 0, 1, "d"),
+            [("G1", 1L)] = new("G1", 1, true, 0, 1, "d"),
+        };
+        var workload = new GraphWorkload { Probes = probes, Expected = expected };
+        var reps = new[]
+        {
+            ValidRep("Degree1", 1, 10), ValidRep("Degree1", 3, 30),
+            ValidRep("Degree2Plus", 1, 10), ValidRep("Degree2Plus", 3, 30),
+        };
+        var result = G1CrossSummaryCalculator.Calculate(workload, reps);
+        var strata = result.IntegrityProblems.Where(p => p.Code == G1CrossIntegrityCode.MissingRepetitionSummary)
+            .Select(p => p.Stratum).ToList();
+        Assert.Equal(new[] { "Degree1", "Degree2Plus" }, strata);
+    }
+
+    private static G1RepetitionSummary Unknown(string op, string stratum, int rep)
+        => new(op, stratum, rep, G1SummaryStatus.Incomplete,
+            new[] { G1IncompleteReason.NotAttemptedDueToHalt }, 1, 0, 0, 0, 0, 0, null);
+
+    [Fact]
     public void ZeroExpectedGroups_FailsClosed()
     {
         var result = Calc(Workload(), ValidRep("Degree1", 1, 10));
