@@ -166,6 +166,53 @@ public class ServingCrossSummaryTests
     }
 
     [Fact]
+    public void AllEightMetrics_MedianVerifiedIndependently()
+    {
+        var workload = Workload(("S1", "Hit"));
+        var r1 = new ServingSummaryMetrics(1, 1, 10, 20, 30, 40, 50, 60, 0.1);
+        var r2 = new ServingSummaryMetrics(1, 2, 11, 21, 31, 41, 51, 61, 0.2);
+        var r3 = new ServingSummaryMetrics(1, 3, 12, 22, 32, 42, 52, 62, 0.3);
+        var result = Calc(workload,
+            Raw("S1", "Hit", 1, ServingSummaryStatus.Valid, 1, Array.Empty<ServingIncompleteReason>(), 1, 1, 0, 0, 0, r1),
+            Raw("S1", "Hit", 2, ServingSummaryStatus.Valid, 1, Array.Empty<ServingIncompleteReason>(), 1, 1, 0, 0, 0, r2),
+            Raw("S1", "Hit", 3, ServingSummaryStatus.Valid, 1, Array.Empty<ServingIncompleteReason>(), 1, 1, 0, 0, 0, r3));
+        var m = Assert.Single(result.CrossSummaries).Metrics!;
+        Assert.Equal(2, m.MinSeconds);
+        Assert.Equal(11, m.P50Seconds);
+        Assert.Equal(21, m.P90Seconds);
+        Assert.Equal(31, m.P95Seconds);
+        Assert.Equal(41, m.P99Seconds);
+        Assert.Equal(51, m.MaxSeconds);
+        Assert.Equal(61, m.MeanSeconds);
+        Assert.Equal(0.2, m.ThroughputPerSecond);
+    }
+
+    [Fact]
+    public void MalformedExtraRep4_NeverCorruptsExpectedGroup()
+    {
+        var workload = Workload(("S1", "Hit"));
+        var malformed = Raw("S1", "Hit", 4, ServingSummaryStatus.Valid,
+            expected: 999, reasons: new[] { ServingIncompleteReason.EnvelopeNotValid },
+            observed: 42, valid: 1, invalid: 1, timeout: 0, error: 0, metrics: null);
+        var result = Calc(workload,
+            ValidRep("S1", "Hit", 1, 1, 10),
+            ValidRep("S1", "Hit", 2, 1, 20),
+            ValidRep("S1", "Hit", 3, 1, 30),
+            malformed);
+        Assert.False(result.InputIntegrityValid);
+        Assert.Contains(result.IntegrityProblems, p => p.Code == ServingCrossIntegrityCode.UnexpectedRepetitionNumber && p.Repetition == 4);
+        Assert.DoesNotContain(result.IntegrityProblems, p => p.Code == ServingCrossIntegrityCode.ExpectedCountMismatch);
+        Assert.DoesNotContain(result.IntegrityProblems, p => p.Code == ServingCrossIntegrityCode.ValidSummaryHasReasons);
+        Assert.DoesNotContain(result.IntegrityProblems, p => p.Code == ServingCrossIntegrityCode.ValidSummaryMissingMetrics);
+        Assert.DoesNotContain(result.IntegrityProblems, p => p.Code == ServingCrossIntegrityCode.ValidSummaryCountsMismatch);
+        Assert.DoesNotContain(result.IntegrityProblems, p => p.Code == ServingCrossIntegrityCode.ValidMetricCountMismatch);
+        var cross = Assert.Single(result.CrossSummaries);
+        Assert.Equal(ServingSummaryStatus.Valid, cross.Status);
+        Assert.Equal(20, cross.Metrics!.MinSeconds);
+        Assert.True(result.ServingComparisonReady);
+    }
+
+    [Fact]
     public void UnexpectedOperationOrStratum_IntegrityInvalid()
     {
         var workload = Workload(("S1", "Hit"));

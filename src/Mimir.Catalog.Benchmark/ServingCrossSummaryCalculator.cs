@@ -48,12 +48,15 @@ public static class ServingCrossSummaryCalculator
 
             foreach (var rec in recs!)
             {
-                shapeProblems += ValidateShape(rec, expectedCount, problems);
+                // Unexpected repetition numbers are extras: they never enter the
+                // expected 1..3 matrix and are never shape-validated against the
+                // expected group, regardless of how malformed the record is.
                 if (rec.Repetition is < 1 or > 3)
                 {
                     problems.Add(new ServingIntegrityProblem(op, stratum, rec.Repetition, ServingCrossIntegrityCode.UnexpectedRepetitionNumber));
                     continue;
                 }
+                shapeProblems += ValidateShape(rec, expectedCount, problems);
                 if (matrix[rec.Repetition] is not null)
                 {
                     problems.Add(new ServingIntegrityProblem(op, stratum, rec.Repetition, ServingCrossIntegrityCode.DuplicateRepetitionSummary));

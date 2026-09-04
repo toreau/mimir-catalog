@@ -116,6 +116,27 @@ public class ServingCrossSummaryEvidenceTests : IDisposable
     }
 
     [Fact]
+    public void MalformedExtraRep4_AxesSurviveEvidenceSerialization()
+    {
+        using var s = NewSession();
+        var malformed = Raw(4, expected: 999, ServingSummaryStatus.Valid,
+            reasons: new[] { ServingIncompleteReason.EnvelopeNotValid }, metrics: null);
+        var result = ServingCrossSummaryEvidence.Run(s, Workload(),
+            Coordinator(true, ValidRep(1, 10), ValidRep(2, 20), ValidRep(3, 30), malformed));
+        Assert.False(result.InputIntegrityValid);
+        Assert.False(result.EvidenceValid);
+        Assert.True(result.ServingComparisonReady);
+        Assert.Contains(result.IntegrityProblems, p => p.Code == ServingCrossIntegrityCode.UnexpectedRepetitionNumber && p.Repetition == 4);
+        var cross = Assert.Single(result.CrossSummaries);
+        Assert.Equal(ServingSummaryStatus.Valid, cross.Status);
+        Assert.Equal(20, cross.Metrics!.MinSeconds);
+        string text = File.ReadAllText(CrossPhysical(s));
+        Assert.Contains("\"serving_comparison_ready\":true", text);
+        Assert.Contains("\"input_integrity_valid\":false", text);
+        Assert.Contains("UnexpectedRepetitionNumber", text);
+    }
+
+    [Fact]
     public void UpstreamEvidenceInvalid_OverallFalse_ReadyUnchanged()
     {
         using var s = NewSession();
