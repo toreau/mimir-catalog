@@ -68,6 +68,8 @@ public static class Program
             return RunServingChild(request, requestPath);
         if (request.WorkloadClass == WorkloadClass.G1)
             return RunG1Child(request, requestPath);
+        if (request.WorkloadClass == WorkloadClass.G2)
+            return RunG2Child(request, requestPath);
 
         // Placeholder: other workload classes are implemented in later sub-slices.
         // No benchmark ERROR result is fabricated; no result document is emitted.
@@ -273,6 +275,110 @@ public static class Program
         };
         ProtocolJson.WriteSingleDocument(Console.Out, result);
         return ProtocolExitCodes.ValidProtocolResult;
+    }
+
+    private static int RunG2Child(ChildRequestEnvelope request, string requestPath)
+        => RunG2ChildCore(
+            request,
+            requestPath,
+            dir => GraphWorkloadLoader.LoadG2(dir),
+            () => new SqliteStorageCandidate(request.CandidatePath));
+
+    /// <summary>
+    /// Internal composition seam: production uses GraphWorkloadLoader.LoadG2 and
+    /// SqliteStorageCandidate; tests inject fixture loader/candidate while still
+    /// exercising the exact production artifact/envelope code paths.
+    /// </summary>
+    internal static int RunG2ChildCore(
+        ChildRequestEnvelope request,
+        string requestPath,
+        Func<string, G2Workload> workloadLoader,
+        Func<IStorageCandidate> candidateFactory)
+    {
+        if (request.Operation != "G2")
+        {
+            Console.Error.WriteLine($"child: G2 operation must be G2, got '{request.Operation}'");
+            return ProtocolExitCodes.FatalProtocolError;
+        }
+
+        G2Workload workload;
+        try
+        {
+            workload = workloadLoader(request.WorkloadPath);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"child: workload load failure: {ex.Message}");
+            return ProtocolExitCodes.FatalProtocolError;
+        }
+
+        string artifactPath = G2ArtifactPath(requestPath);
+
+        G2TimingExecution execution;
+        try
+        {
+            using IStorageCandidate candidate = candidateFactory();
+            candidate.Open();
+            execution = new G2TimingRunner(candidate, workload, request.Repetition).Execute();
+        }
+        catch (Exception ex)
+        {
+            execution = new G2TimingExecution
+            {
+                Repetition = request.Repetition,
+                Correctness = ServingStatuses.Error,
+                PerInputResults = Array.Empty<G2TimedPerInputResult>(),
+                BatchResult = null,
+                ErrorCategory = "runtime",
+                ErrorMessage = ex.Message,
+            };
+            Console.Error.WriteLine($"child: G2 execution failure: {ex.Message}");
+        }
+
+        try
+        {
+            G2ResultArtifact.WriteCreateNew(artifactPath, execution.PerInputResults, execution.BatchResult);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"child: failed to write G2 result artifact: {ex.Message}");
+            return ProtocolExitCodes.FatalProtocolError;
+        }
+
+        LogicalStatus status = execution.Correctness switch
+        {
+            ServingStatuses.Valid => LogicalStatus.Valid,
+            ServingStatuses.Invalid => LogicalStatus.Invalid,
+            _ => LogicalStatus.Error,
+        };
+        bool hasBatch = execution.BatchResult is not null;
+        var result = new ChildResultEnvelope
+        {
+            ProtocolVersion = request.ProtocolVersion,
+            CandidateId = request.CandidateId,
+            CandidateConfigId = request.CandidateConfigId,
+            WorkloadId = request.WorkloadId,
+            CorpusId = request.CorpusId,
+            WorkloadClass = request.WorkloadClass,
+            Operation = "G2",
+            Repetition = request.Repetition,
+            Status = status,
+            CorrectnessStatus = execution.Correctness,
+            WallSeconds = hasBatch ? execution.BatchResult!.WallSeconds : null,
+            ResultCardinality = hasBatch ? execution.BatchResult!.ActualCardinality : null,
+            ResultDigest = hasBatch ? execution.BatchResult!.ActualDigest : null,
+            ErrorCategory = status == LogicalStatus.Error ? execution.ErrorCategory : null,
+            ErrorMessage = status == LogicalStatus.Error ? execution.ErrorMessage : null,
+        };
+        ProtocolJson.WriteSingleDocument(Console.Out, result);
+        return ProtocolExitCodes.ValidProtocolResult;
+    }
+
+    internal static string G2ArtifactPath(string requestPath)
+    {
+        string dir = Path.GetDirectoryName(requestPath) ?? ".";
+        string name = Path.GetFileNameWithoutExtension(requestPath);
+        return Path.Combine(dir, name + ".g2-results.jsonl");
     }
 
     internal static string G1ArtifactPath(string requestPath)

@@ -5,34 +5,32 @@ using Mimir.Catalog.Workload;
 
 namespace Mimir.Catalog.BenchmarkCli.Tests;
 
-public class G1CliContractTests : IDisposable
+public class G2CliContractTests : IDisposable
 {
-    private sealed class GraphCandidate : IStorageCandidate
+    private sealed class G2Candidate : IStorageCandidate
     {
         public bool ThrowOnOpen { get; init; }
-        public bool ThrowOnSubclassOf { get; init; }
-        public bool ReturnParent { get; init; }
+        public bool ThrowOnInstanceOf { get; init; }
+        public bool ReturnTarget { get; init; }
         public void Open() { if (ThrowOnOpen) throw new InvalidOperationException("open boom"); }
         public void Dispose() { }
         public ConceptHit GetConcept(long qid) => new(true, true, false);
         public IReadOnlyList<LexicalHit> LookupLexical(string lang, string value) => Array.Empty<LexicalHit>();
         public IReadOnlyList<LexicalRow> GetLexicalByQid(long qid) => Array.Empty<LexicalRow>();
-        public IReadOnlyList<long> GetInstanceOf(long qid) => Array.Empty<long>();
-        public IReadOnlyList<long> GetSubclassOf(long qid)
+        public IReadOnlyList<long> GetInstanceOf(long qid)
         {
-            if (ThrowOnSubclassOf) throw new InvalidOperationException("traverse boom");
-            return ReturnParent ? new[] { qid + 1_000_000 } : Array.Empty<long>();
+            if (ThrowOnInstanceOf) throw new InvalidOperationException("instance boom");
+            return ReturnTarget ? new[] { qid + 1_000_000 } : Array.Empty<long>();
         }
+        public IReadOnlyList<long> GetSubclassOf(long qid) => Array.Empty<long>();
     }
 
-    private readonly string _dir = Path.Combine(Path.GetTempPath(), "mimir-g1-cli-" + Guid.NewGuid().ToString("N"));
+    private readonly string _dir = Path.Combine(Path.GetTempPath(), "mimir-g2-cli-" + Guid.NewGuid().ToString("N"));
 
-    public G1CliContractTests() => Directory.CreateDirectory(_dir);
+    public G2CliContractTests() => Directory.CreateDirectory(_dir);
     public void Dispose() { try { Directory.Delete(_dir, true); } catch { } }
 
-    private static string EmptyDigest() => WorkloadOracle.G1Digest(Array.Empty<long>(), 1);
-
-    private static ChildRequestEnvelope Request(WorkloadClass workloadClass = WorkloadClass.G1, string operation = "G1") => new()
+    private static ChildRequestEnvelope Request(WorkloadClass workloadClass = WorkloadClass.G2, string operation = "G2") => new()
     {
         ProtocolVersion = ProtocolConstants.ChildProtocolVersion,
         CandidateId = CandidateAIdentity.CandidateId,
@@ -44,22 +42,26 @@ public class G1CliContractTests : IDisposable
         Repetition = 1,
         CandidatePath = "/fixture/candidate.db",
         WorkloadPath = "/fixture/workload",
-        RunId = "run-cli-g1",
+        RunId = "run-cli-g2",
     };
 
     private string RequestPath() => Path.Combine(_dir, "example.request.json");
 
-    private static GraphWorkload G1Workload()
+    private static G2Workload Workload(int count = 3)
     {
-        var probe = new GraphProbe("G1", 0, "Degree1", true, 1000);
-        return new GraphWorkload
+        var concepts = new List<G2Concept>();
+        var perInput = new List<G2PerInputExpected>();
+        for (int i = 0; i < count; i++)
         {
-            Probes = new[] { probe },
-            Expected = new Dictionary<(string, long), GraphExpected> { [("G1", 0L)] = new("G1", 0, true, 0, 1, EmptyDigest()) },
-        };
+            concepts.Add(new G2Concept(1000 + i, i % 2 == 0 ? "P31Degree1" : "P31Degree2Plus"));
+            perInput.Add(new G2PerInputExpected(i, 1000 + i, i % 2 == 0 ? "P31Degree1" : "P31Degree2Plus", 0,
+                WorkloadOracle.StructuralSetDigest(Array.Empty<long>())));
+        }
+        var rows = concepts.Select(c => (c.Qid, Array.Empty<long>())).ToList();
+        return new G2Workload { Concepts = concepts, PerInput = perInput, Batch = new G2BatchExpected(count, WorkloadOracle.G2BatchDigest(rows)) };
     }
 
-    private (int Exit, string Stdout) Run(Func<string, GraphWorkload> loader, IStorageCandidate candidate)
+    private (int Exit, string Stdout) Run(Func<string, G2Workload> loader, IStorageCandidate candidate)
     {
         var request = Request();
         File.WriteAllText(RequestPath(), ProtocolJson.ToJson(request));
@@ -71,7 +73,7 @@ public class G1CliContractTests : IDisposable
         {
             Console.SetOut(outW);
             Console.SetError(errW);
-            int exit = Program.RunG1ChildCore(request, RequestPath(), loader, () => candidate);
+            int exit = Program.RunG2ChildCore(request, RequestPath(), loader, () => candidate);
             return (exit, outW.ToString());
         }
         finally
@@ -82,74 +84,77 @@ public class G1CliContractTests : IDisposable
     }
 
     [Fact]
-    public void ValidRun_Exit0_EnvelopeAndArtifact()
+    public void ValidRun_Exit0_EnvelopeWithBatchFactsAndArtifact()
     {
-        var (exit, stdout) = Run(_ => G1Workload(), new GraphCandidate());
+        var (exit, stdout) = Run(_ => Workload(), new G2Candidate());
         Assert.Equal(0, exit);
         var env = ProtocolJson.DeserializeStrict<ChildResultEnvelope>(System.Text.Encoding.UTF8.GetBytes(stdout));
         Assert.Equal(LogicalStatus.Valid, env.Status);
         Assert.Equal("VALID", env.CorrectnessStatus);
-        Assert.Equal(WorkloadClass.G1, env.WorkloadClass);
-        Assert.Equal("G1", env.Operation);
-        Assert.Null(env.ResultCardinality);
-        Assert.Null(env.ResultDigest);
-        string artifact = Program.G1ArtifactPath(RequestPath());
+        Assert.Equal(WorkloadClass.G2, env.WorkloadClass);
+        Assert.Equal("G2", env.Operation);
+        Assert.NotNull(env.WallSeconds);
+        Assert.Equal(3, env.ResultCardinality);
+        Assert.NotNull(env.ResultDigest);
+        string artifact = Program.G2ArtifactPath(RequestPath());
         Assert.True(File.Exists(artifact));
-        Assert.NotEmpty(File.ReadAllText(artifact).Trim());
+        string text = File.ReadAllText(artifact);
+        Assert.Equal(4, text.TrimEnd('\n').Split('\n').Length); // 3 per-input + 1 batch
     }
 
     [Fact]
-    public void InvalidRun_ZeroSamples_Exit0_Envelope()
+    public void WarmupInvalidRun_NoTimedBatch_EnvelopeNoFacts()
     {
-        var (exit, stdout) = Run(_ => G1Workload(), new GraphCandidate { ReturnParent = true });
+        var (exit, stdout) = Run(_ => Workload(), new G2Candidate { ReturnTarget = true });
         Assert.Equal(0, exit);
         var env = ProtocolJson.DeserializeStrict<ChildResultEnvelope>(System.Text.Encoding.UTF8.GetBytes(stdout));
         Assert.Equal(LogicalStatus.Invalid, env.Status);
         Assert.Equal("INVALID", env.CorrectnessStatus);
-        Assert.Null(env.ErrorCategory);
-        Assert.Equal(0, new FileInfo(Program.G1ArtifactPath(RequestPath())).Length);
+        Assert.Null(env.WallSeconds);
+        Assert.Null(env.ResultCardinality);
+        Assert.Null(env.ResultDigest);
+        Assert.Equal(0, new FileInfo(Program.G2ArtifactPath(RequestPath())).Length);
     }
 
     [Fact]
-    public void ErrorRun_WarmupCategory_Exit0_EnvelopeAndEmptyArtifact()
+    public void ErrorRun_WarmupCategory_Exit0_EmptyArtifact()
     {
-        var (exit, stdout) = Run(_ => G1Workload(), new GraphCandidate { ThrowOnSubclassOf = true });
+        var (exit, stdout) = Run(_ => Workload(), new G2Candidate { ThrowOnInstanceOf = true });
         Assert.Equal(0, exit);
         var env = ProtocolJson.DeserializeStrict<ChildResultEnvelope>(System.Text.Encoding.UTF8.GetBytes(stdout));
         Assert.Equal(LogicalStatus.Error, env.Status);
-        Assert.Equal("ERROR", env.CorrectnessStatus);
         Assert.Equal("warmup", env.ErrorCategory);
         Assert.NotNull(env.ErrorMessage);
-        Assert.Equal(0, new FileInfo(Program.G1ArtifactPath(RequestPath())).Length);
+        Assert.Equal(0, new FileInfo(Program.G2ArtifactPath(RequestPath())).Length);
     }
 
     [Fact]
-    public void RuntimeOpenFailure_ErrorCategoryRuntime_Exit0_EmptyArtifact()
+    public void RuntimeOpenFailure_Exit0_RuntimeCategory_EmptyArtifact()
     {
-        var (exit, stdout) = Run(_ => G1Workload(), new GraphCandidate { ThrowOnOpen = true });
+        var (exit, stdout) = Run(_ => Workload(), new G2Candidate { ThrowOnOpen = true });
         Assert.Equal(0, exit);
         var env = ProtocolJson.DeserializeStrict<ChildResultEnvelope>(System.Text.Encoding.UTF8.GetBytes(stdout));
         Assert.Equal(LogicalStatus.Error, env.Status);
         Assert.Equal("runtime", env.ErrorCategory);
-        Assert.NotNull(env.ErrorMessage);
-        Assert.Equal(0, new FileInfo(Program.G1ArtifactPath(RequestPath())).Length);
+        Assert.Null(env.WallSeconds);
+        Assert.Equal(0, new FileInfo(Program.G2ArtifactPath(RequestPath())).Length);
     }
 
     [Fact]
     public void WorkloadLoadFailure_Nonzero_NoEnvelope_NoArtifact()
     {
-        var (exit, stdout) = Run(_ => throw new InvalidDataException("missing package"), new GraphCandidate());
+        var (exit, stdout) = Run(_ => throw new InvalidDataException("missing package"), new G2Candidate());
         Assert.NotEqual(0, exit);
         Assert.Empty(stdout);
-        Assert.False(File.Exists(Program.G1ArtifactPath(RequestPath())));
+        Assert.False(File.Exists(Program.G2ArtifactPath(RequestPath())));
     }
 
     [Fact]
     public void ArtifactCollision_Nonzero_NoEnvelope_PreservesExisting()
     {
-        string artifact = Program.G1ArtifactPath(RequestPath());
+        string artifact = Program.G2ArtifactPath(RequestPath());
         File.WriteAllText(artifact, "keep-me");
-        var (exit, stdout) = Run(_ => G1Workload(), new GraphCandidate());
+        var (exit, stdout) = Run(_ => Workload(), new G2Candidate());
         Assert.NotEqual(0, exit);
         Assert.Empty(stdout);
         Assert.Equal("keep-me", File.ReadAllText(artifact));
@@ -158,8 +163,8 @@ public class G1CliContractTests : IDisposable
     [Fact]
     public void ArtifactPathConvention()
     {
-        Assert.Equal(Path.Combine(_dir, "example.request.g1-samples.jsonl"),
-            Program.G1ArtifactPath(RequestPath()));
+        Assert.Equal(Path.Combine(_dir, "example.request.g2-results.jsonl"),
+            Program.G2ArtifactPath(RequestPath()));
     }
 
     private int MainChild(WorkloadClass workloadClass, string operation, string workloadPath = "/fixture/workload")
@@ -184,21 +189,19 @@ public class G1CliContractTests : IDisposable
     }
 
     [Fact]
-    public void G1Dispatch_ReachesWorkloadLoading_NotExecutionNotImplemented()
+    public void G2Dispatch_ReachesWorkloadLoading_NotExecutionNotImplemented()
     {
-        // The G1 branch is entered (workload load fails against a bogus path and
-        // returns FatalProtocolError=1) rather than falling to ExecutionNotImplemented=3.
-        int exit = MainChild(WorkloadClass.G1, "G1", workloadPath: Path.Combine(_dir, "missing-workload"));
-        Assert.Equal(ProtocolExitCodes.FatalProtocolError, exit);
-        Assert.False(File.Exists(Program.G1ArtifactPath(RequestPath())));
-    }
-
-    [Fact]
-    public void G2Dispatch_ReachesG2WorkloadLoading()
-    {
-        // G2 now has its own child path: a bogus workload path yields
-        // FatalProtocolError (workload loading), not ExecutionNotImplemented.
         int exit = MainChild(WorkloadClass.G2, "G2", workloadPath: Path.Combine(_dir, "missing-workload"));
         Assert.Equal(ProtocolExitCodes.FatalProtocolError, exit);
+        Assert.False(File.Exists(Program.G2ArtifactPath(RequestPath())));
+    }
+
+    [Theory]
+    [InlineData(WorkloadClass.Analytical, "A1")]
+    [InlineData(WorkloadClass.Open, "open_ready")]
+    [InlineData(WorkloadClass.Build, "build")]
+    public void LaterWorkloadClasses_RemainExecutionNotImplemented(WorkloadClass workloadClass, string operation)
+    {
+        Assert.Equal(ProtocolExitCodes.ExecutionNotImplemented, MainChild(workloadClass, operation));
     }
 }
