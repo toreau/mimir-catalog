@@ -120,18 +120,40 @@ public class ServingRunCoordinatorTests : IDisposable
     }
 
     [Theory]
-    [InlineData(LogicalStatus.Invalid, "INVALID")]
-    [InlineData(LogicalStatus.Error, "ERROR")]
-    public async Task BenchmarkInvalidOrError_DoesNotStop(LogicalStatus status, string correctness)
+    [InlineData(LogicalStatus.Invalid, "INVALID", true, false)]
+    [InlineData(LogicalStatus.Error, "ERROR", false, true)]
+    public async Task BenchmarkInvalidOrError_DoesNotStop(LogicalStatus status, string correctness, bool complete, bool errorPrefix)
     {
         using var s = NewSession();
         int calls = 0;
         var result = await RunCoordinator(s, Workload(),
-            oneChild: (op, rep, _) => { calls++; return Task.FromResult(Child(op, rep, status, correctness, samples: Array.Empty<ServingParentSample>())); });
+            oneChild: (op, rep, _) =>
+            {
+                calls++;
+                var samples = errorPrefix
+                    ? new[] { new ServingParentSample(op, 1, "Hit", 5.0, TimedResultStatus.Error, "ERROR", Error: "boom") }
+                    : new[] { new ServingParentSample(op, 1, "Hit", 0.5, TimedResultStatus.Invalid, "INVALID", 0, "x") };
+                return Task.FromResult(Child(op, rep, status, correctness, measuredComplete: complete, samples: samples));
+            });
         Assert.Equal(15, calls);
         Assert.True(result.CoordinatorComplete);
         Assert.True(result.EvidenceValid);
-        Assert.All(result.RepetitionSummaries, sm => Assert.Equal(ServingSummaryStatus.Incomplete, sm.Status));
+        var s1 = result.RepetitionSummaries.Single(sm => sm.Operation == "S1" && sm.Repetition == 1);
+        Assert.Equal(ServingSummaryStatus.Incomplete, s1.Status);
+        Assert.Null(s1.Metrics);
+        if (errorPrefix)
+        {
+            Assert.Equal(1, s1.ObservedCount);
+            Assert.Equal(1, s1.ErrorCount);
+            Assert.Contains(ServingIncompleteReason.ErrorSample, s1.Reasons);
+            Assert.Contains(ServingIncompleteReason.MeasuredSequenceIncomplete, s1.Reasons);
+        }
+        else
+        {
+            Assert.Equal(1, s1.ObservedCount);
+            Assert.Equal(1, s1.InvalidCount);
+            Assert.Contains(ServingIncompleteReason.InvalidSample, s1.Reasons);
+        }
     }
 
     [Fact]
@@ -148,13 +170,16 @@ public class ServingRunCoordinatorTests : IDisposable
     [Fact]
     public async Task ResourceErrorOrUnavailable_DoesNotStop()
     {
-        using var s = NewSession();
-        bool useError = true;
-        var result = await RunCoordinator(s, Workload(), oneChild: (op, rep, _) => Task.FromResult(
-            Child(op, rep, resource: useError ? ResourceMeasurementStatus.Error : ResourceMeasurementStatus.Unavailable)));
-        Assert.True(result.CoordinatorComplete);
-        Assert.True(result.EvidenceValid);
-        Assert.Equal("Error", result.Executions[0].ResourceStatus);
+        foreach (var status in new[] { ResourceMeasurementStatus.Error, ResourceMeasurementStatus.Unavailable })
+        {
+            using var s = NewSession();
+            var result = await RunCoordinator(s, Workload(), oneChild: (op, rep, _) => Task.FromResult(
+                Child(op, rep, resource: status)));
+            Assert.True(result.CoordinatorComplete);
+            Assert.True(result.EvidenceValid);
+            Assert.Equal(status.ToString(), result.Executions[0].ResourceStatus);
+            Assert.All(result.RepetitionSummaries, sm => Assert.Equal(ServingSummaryStatus.Valid, sm.Status));
+        }
     }
 
     [Theory]
@@ -246,4 +271,50 @@ public class ServingRunCoordinatorTests : IDisposable
         var actual = result.RepetitionSummaries.Select(sm => (sm.Operation, sm.Repetition)).ToList();
         Assert.Equal(expected, actual);
     }
+    [Fact]
+    public async Task TimedErrorPrefix_Continues_AndRetainsPrefixDiagnostics()
+    {
+        using var s = NewSession();
+        int calls = 0;
+        var result = await RunCoordinator(s, Workload(),
+            oneChild: (op, rep, _) =>
+            {
+                calls++;
+                var samples = new[]
+                {
+                    new ServingParentSample(op, 1, "Hit", 0.5, TimedResultStatus.Invalid, "INVALID", 0, "x"),
+                    new ServingParentSample(op, 2, "Hit", 5.0, TimedResultStatus.Error, "ERROR", Error: "boom"),
+                };
+                return Task.FromResult(Child(op, rep, LogicalStatus.Error, "ERROR", measuredComplete: false, samples: samples));
+            });
+        Assert.Equal(15, calls);
+        Assert.True(result.CoordinatorComplete);
+        Assert.True(result.EvidenceValid);
+        var sm = result.RepetitionSummaries.Single(x => x.Operation == "S1" && x.Repetition == 1);
+        Assert.Equal(ServingSummaryStatus.Incomplete, sm.Status);
+        Assert.Null(sm.Metrics);
+        Assert.Equal(2, sm.ObservedCount);
+        Assert.Equal(1, sm.InvalidCount);
+        Assert.Equal(1, sm.ErrorCount);
+        Assert.Contains(ServingIncompleteReason.ErrorSample, sm.Reasons);
+        Assert.Contains(ServingIncompleteReason.InvalidSample, sm.Reasons);
+        Assert.Contains(ServingIncompleteReason.MeasuredSequenceIncomplete, sm.Reasons);
+    }
+
+    [Fact]
+    public async Task SecondParentOwnedWriteFailure_FailsClosed_WithoutRollback()
+    {
+        using var s = NewSession();
+        string summaryPhysical = Path.Combine(s.StagingPath, "serving", "repetition-summaries.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(summaryPhysical)!);
+        File.WriteAllText(summaryPhysical, "occupied"); // summary write will fail create-new after coordinator.json succeeds
+        var result = await RunCoordinator(s, Workload(), oneChild: (op, rep, _) => Task.FromResult(Child(op, rep)));
+        Assert.True(result.CoordinatorComplete);
+        Assert.False(result.EvidenceValid);
+        Assert.Equal(15, result.AttemptedExecutionCount);
+        string coordinator = File.ReadAllText(Path.Combine(s.StagingPath, "serving", "coordinator.json"));
+        Assert.Contains("\"coordinator_complete\":true", coordinator); // retained/registered
+        Assert.Equal("occupied", File.ReadAllText(summaryPhysical)); // not overwritten/deleted
+    }
 }
+

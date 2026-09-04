@@ -6,6 +6,11 @@ namespace Mimir.Catalog.Benchmark;
 /// Computes one (operation,stratum,repetition) repetition summary from the
 /// closed one-child facts. Parent-samples are the only measurement source;
 /// no re-parsing, re-classification or re-validation happens here.
+///
+/// Diagnostic trust (may the parent-validated samples feed counts?) is separate
+/// from summary completeness. A trustworthy timed-ERROR prefix keeps its
+/// diagnostic counts even though MeasuredSequenceComplete is false; it never
+/// yields metrics.
 /// </summary>
 public static class ServingSummaryCalculator
 {
@@ -20,7 +25,6 @@ public static class ServingSummaryCalculator
             return Incomplete(operation, stratum, repetition, expectedCount, new[] { ServingIncompleteReason.NotAttemptedDueToHalt });
 
         var reasons = new List<ServingIncompleteReason>();
-        bool trustworthy = snapshot.EvidenceValid && snapshot.RegisteredStableArtifacts;
 
         if (!snapshot.EvidenceValid) reasons.Add(ServingIncompleteReason.ExecutionEvidenceInvalid);
         if (!snapshot.RegisteredStableArtifacts) reasons.Add(ServingIncompleteReason.StableArtifactCaptureFailed);
@@ -28,29 +32,33 @@ public static class ServingSummaryCalculator
         if (snapshot.EnvelopeStatus != "VALID") reasons.Add(ServingIncompleteReason.EnvelopeNotValid);
         if (!snapshot.MeasuredSequenceComplete) reasons.Add(ServingIncompleteReason.MeasuredSequenceIncomplete);
 
-        bool samplesTrustworthy = trustworthy && snapshot.ProcessCompleted && snapshot.MeasuredSequenceComplete;
-        var samples = samplesTrustworthy
+        // Parent samples are authoritative diagnostics whenever evidence is valid,
+        // stable capture succeeded and the process completed. MeasuredSequenceComplete
+        // gates metrics/validity only, not diagnostic counts.
+        bool diagnosticTrust = snapshot.EvidenceValid && snapshot.RegisteredStableArtifacts && snapshot.ProcessCompleted;
+        var samples = diagnosticTrust
             ? snapshot.Samples.Where(s => s.Stratum == stratum).OrderBy(s => s.Sequence).ToList()
             : new List<ServingParentSample>();
 
-        if (samplesTrustworthy)
+        if (diagnosticTrust)
         {
             if (samples.Any(s => s.Status == TimedResultStatus.Invalid)) reasons.Add(ServingIncompleteReason.InvalidSample);
             if (samples.Any(s => s.Status == TimedResultStatus.Timeout)) reasons.Add(ServingIncompleteReason.TimeoutSample);
             if (samples.Any(s => s.Status == TimedResultStatus.Error)) reasons.Add(ServingIncompleteReason.ErrorSample);
             if (samples.Count != expectedCount) reasons.Add(ServingIncompleteReason.MissingSamples);
         }
-        // Envelope-level Tail INVALID/ERROR with complete all-valid measured
-        // samples carries no per-sample reason; EnvelopeNotValid above suffices.
 
-        long observed = samplesTrustworthy ? samples.Count : 0;
-        long invalid = samplesTrustworthy ? samples.Count(s => s.Status == TimedResultStatus.Invalid) : 0;
-        long timeout = samplesTrustworthy ? samples.Count(s => s.Status == TimedResultStatus.Timeout) : 0;
-        long error = samplesTrustworthy ? samples.Count(s => s.Status == TimedResultStatus.Error) : 0;
-        long valid = samplesTrustworthy ? samples.Count(s => s.Status == TimedResultStatus.Valid) : 0;
+        long observed = diagnosticTrust ? samples.Count : 0;
+        long invalid = diagnosticTrust ? samples.Count(s => s.Status == TimedResultStatus.Invalid) : 0;
+        long timeout = diagnosticTrust ? samples.Count(s => s.Status == TimedResultStatus.Timeout) : 0;
+        long error = diagnosticTrust ? samples.Count(s => s.Status == TimedResultStatus.Error) : 0;
+        long valid = diagnosticTrust ? samples.Count(s => s.Status == TimedResultStatus.Valid) : 0;
+
+        // Mechanically deterministic reason ordering.
+        var orderedReasons = reasons.Distinct().OrderBy(r => r).ToList();
 
         ServingSummaryMetrics? metrics = null;
-        if (reasons.Count == 0 && observed == expectedCount && observed > 0 && valid == observed)
+        if (orderedReasons.Count == 0 && observed == expectedCount && observed > 0 && valid == observed)
         {
             var wall = samples.Select(s => s.WallSeconds).OrderBy(v => v).ToList();
             double sum = wall.Sum();
@@ -66,8 +74,8 @@ public static class ServingSummaryCalculator
                 WorkloadMetrics.ThroughputPerSecond(observed, sum));
         }
 
-        var status = reasons.Count == 0 ? ServingSummaryStatus.Valid : ServingSummaryStatus.Incomplete;
-        return new ServingRepetitionSummary(operation, stratum, repetition, status, reasons,
+        var status = orderedReasons.Count == 0 ? ServingSummaryStatus.Valid : ServingSummaryStatus.Incomplete;
+        return new ServingRepetitionSummary(operation, stratum, repetition, status, orderedReasons,
             expectedCount, observed, valid, invalid, timeout, error, metrics);
     }
 

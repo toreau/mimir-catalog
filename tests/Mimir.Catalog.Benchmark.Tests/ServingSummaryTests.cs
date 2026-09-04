@@ -120,4 +120,49 @@ public class ServingSummaryTests
         Assert.Equal(1, summary.ObservedCount);
         Assert.Equal(2.0, summary.Metrics!.MeanSeconds);
     }
+    [Fact]
+    public void TimedErrorPrefix_CountsRetained()
+    {
+        // Expected 3; observed VALID,INVALID,ERROR prefix (complete length but ERROR envelope).
+        var prefix = new List<ServingParentSample>
+        {
+            Sample("Hit", 1, TimedResultStatus.Valid, wall: 1.0),
+            Sample("Hit", 2, TimedResultStatus.Invalid),
+            Sample("Hit", 3, TimedResultStatus.Error),
+        };
+        var summary = ServingSummaryCalculator.Summarize("S1", "Hit", 1, 3,
+            Snapshot(envelopeStatus: "ERROR", measuredComplete: false, samples: prefix));
+        Assert.Equal(ServingSummaryStatus.Incomplete, summary.Status);
+        Assert.Null(summary.Metrics);
+        Assert.Equal(3, summary.ObservedCount);
+        Assert.Equal(1, summary.ValidCount);
+        Assert.Equal(1, summary.InvalidCount);
+        Assert.Equal(1, summary.ErrorCount);
+        Assert.DoesNotContain(ServingIncompleteReason.MissingSamples, summary.Reasons);
+        Assert.Contains(ServingIncompleteReason.EnvelopeNotValid, summary.Reasons);
+        Assert.Contains(ServingIncompleteReason.MeasuredSequenceIncomplete, summary.Reasons);
+        Assert.Contains(ServingIncompleteReason.ErrorSample, summary.Reasons);
+        Assert.Contains(ServingIncompleteReason.InvalidSample, summary.Reasons);
+    }
+
+    [Fact]
+    public void ShortTimedErrorPrefix_MissingSamplesRetained()
+    {
+        // Expected 5; observed VALID,ERROR prefix.
+        var prefix = new List<ServingParentSample>
+        {
+            Sample("Hit", 1, TimedResultStatus.Valid, wall: 1.0),
+            Sample("Hit", 2, TimedResultStatus.Error),
+        };
+        var summary = ServingSummaryCalculator.Summarize("S1", "Hit", 1, 5,
+            Snapshot(envelopeStatus: "ERROR", measuredComplete: false, samples: prefix));
+        Assert.Equal(ServingSummaryStatus.Incomplete, summary.Status);
+        Assert.Null(summary.Metrics);
+        Assert.Equal(2, summary.ObservedCount);
+        Assert.Equal(1, summary.ValidCount);
+        Assert.Equal(1, summary.ErrorCount);
+        Assert.Contains(ServingIncompleteReason.MissingSamples, summary.Reasons);
+        Assert.Contains(ServingIncompleteReason.ErrorSample, summary.Reasons);
+    }
 }
+
