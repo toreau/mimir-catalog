@@ -147,28 +147,38 @@ public static class ServingChildOrchestrator
             }
         }
 
-        // Resource evidence: Valid implies a stable registered raw output + RSS.
+        // Resource evidence. Fail closed on the frozen active-file rule: never
+        // snapshot/register a resource output while the wrapper may still write it.
+        bool resourceStable = !process.TimedOut || process.WrapperExitObserved;
         if (resource.ResourceStatus == ResourceMeasurementStatus.Valid)
         {
-            if (resource.ExternalPeakRssBytes is null)
-                problems.Add("resource status Valid but no external peak RSS bytes");
-            if (string.IsNullOrEmpty(resource.ResourceOutputPath) || !EvidencePathSafety.IsSamePath(resource.ResourceOutputPath, resourcePhysical))
-                problems.Add("resource output path does not match this execution's supplied path");
-            if (!File.Exists(resourcePhysical))
+            if (!resourceStable)
             {
-                problems.Add("resource status Valid but raw resource output file missing");
+                problems.Add("resource status Valid but resource output is not stable (timeout, wrapper not observed)");
                 captureOk = false;
             }
             else
             {
-                try { session.RegisterExisting(resourceRel); }
-                catch (Exception ex) { problems.Add($"failed to register resource output: {ex.Message}"); captureOk = false; }
+                if (resource.ExternalPeakRssBytes is null)
+                    problems.Add("resource status Valid but no external peak RSS bytes");
+                if (string.IsNullOrEmpty(resource.ResourceOutputPath) || !EvidencePathSafety.IsSamePath(resource.ResourceOutputPath, resourcePhysical))
+                    problems.Add("resource output path does not match this execution's supplied path");
+                if (!File.Exists(resourcePhysical))
+                {
+                    problems.Add("resource status Valid but raw resource output file missing");
+                    captureOk = false;
+                }
+                else
+                {
+                    try { session.RegisterExisting(resourceRel); }
+                    catch (Exception ex) { problems.Add($"failed to register resource output: {ex.Message}"); captureOk = false; }
+                }
             }
         }
-        else if (File.Exists(resourcePhysical) && process.WrapperExitObserved)
+        else if (resourceStable && File.Exists(resourcePhysical))
         {
             try { session.RegisterExisting(resourceRel); }
-            catch (Exception ex) { problems.Add($"failed to register resource output: {ex.Message}"); }
+            catch (Exception ex) { problems.Add($"failed to register resource output: {ex.Message}"); captureOk = false; }
         }
 
         bool ownedOk = true;
@@ -333,9 +343,9 @@ public static class ServingChildOrchestrator
         bool ok = true;
         string envStatus = env.CorrectnessStatus;
         var statuses = raw.Select(s => s.CorrectnessStatus).ToList();
-        bool allValid = statuses.All(s => s == ServingStatuses.Valid);
         bool hasInvalid = statuses.Contains(ServingStatuses.Invalid);
         bool hasMeasuredError = statuses.Contains(ServingStatuses.Error);
+        int errorCount = statuses.Count(s => s == ServingStatuses.Error);
 
         if (envStatus is ServingStatuses.Valid or ServingStatuses.Invalid)
         {
@@ -349,22 +359,38 @@ public static class ServingChildOrchestrator
         if (envStatus == ServingStatuses.Valid)
         {
             if (raw.Count != measured.Count) { problems.Add("VALID envelope requires complete measured sequence"); ok = false; }
-            if (!allValid) { problems.Add("VALID envelope requires every sample correctness VALID"); ok = false; }
+            if (!statuses.All(s => s == ServingStatuses.Valid))
+            {
+                problems.Add("VALID envelope requires every sample correctness VALID");
+                ok = false;
+            }
         }
         else if (envStatus == ServingStatuses.Invalid)
         {
-            bool legitimateZero = raw.Count == 0;
-            bool fullAllValidS1Tail = operation == "S1" && raw.Count == measured.Count && allValid;
-            bool hasConfirmedInvalid = hasInvalid;
-            if (!legitimateZero && !fullAllValidS1Tail && !hasConfirmedInvalid)
+            // The child contract never produces an INVALID envelope that
+            // contains a measured ERROR sample.
+            if (hasMeasuredError)
             {
-                problems.Add("INVALID envelope not covered by a legitimate child contract form");
+                problems.Add("INVALID envelope must never contain measured ERROR samples");
                 ok = false;
             }
-            if (operation != "S1" && raw.Count == measured.Count && allValid)
+            else if (raw.Count == 0)
             {
-                problems.Add("INVALID envelope inconsistent with complete all-VALID measured samples for non-S1");
+                // warmup INVALID
+            }
+            else if (raw.Count != measured.Count)
+            {
+                problems.Add("INVALID envelope with a partial measured sequence is impossible");
                 ok = false;
+            }
+            else
+            {
+                bool s1TailAllValid = operation == "S1";
+                if (!hasInvalid && !s1TailAllValid)
+                {
+                    problems.Add("complete INVALID envelope without any INVALID sample is impossible (S1 Tail excluded)");
+                    ok = false;
+                }
             }
         }
         else if (envStatus == ServingStatuses.Error)
@@ -382,42 +408,41 @@ public static class ServingChildOrchestrator
                     ok = false;
                 }
             }
-            else if (hasMeasuredError)
+            else if (env.ErrorCategory == "tail")
             {
-                if (env.ErrorCategory != "timed-probe")
+                if (operation != "S1" || raw.Count != measured.Count || hasMeasuredError)
                 {
-                    problems.Add("ERROR prefix envelope requires ErrorCategory timed-probe");
+                    problems.Add("tail ERROR requires S1, complete measured samples and no measured ERROR");
                     ok = false;
                 }
-                if (raw[^1].Error is null || env.ErrorMessage != raw[^1].Error)
+            }
+            else if (env.ErrorCategory == "timed-probe")
+            {
+                // Exactly one measured ERROR, and it must be the final sample.
+                if (errorCount != 1 || raw[^1].CorrectnessStatus != ServingStatuses.Error)
+                {
+                    problems.Add("timed-probe ERROR requires exactly one measured ERROR as the final sample");
+                    ok = false;
+                }
+                else if (raw[^1].Error is null || env.ErrorMessage != raw[^1].Error)
                 {
                     problems.Add("ERROR prefix envelope message must match the final ERROR sample");
                     ok = false;
                 }
-                if (raw.Count < measured.Count && !allValid && raw[^1].CorrectnessStatus != ServingStatuses.Error)
+                if (raw.Count < measured.Count && raw[^1].CorrectnessStatus != ServingStatuses.Error)
                 {
-                    // covered by sequence prefix rule
-                }
-            }
-            else if (operation == "S1" && raw.Count == measured.Count && !hasMeasuredError)
-            {
-                if (env.ErrorCategory != "tail")
-                {
-                    problems.Add("S1 complete measured ERROR envelope requires ErrorCategory tail");
+                    // unreachable given the checks above; defensive
+                    problems.Add("incomplete timed sequence must end in ERROR");
                     ok = false;
                 }
             }
             else
             {
-                problems.Add("ERROR envelope not covered by a legitimate child contract form");
-                ok = false;
-            }
-            if (operation != "S1" && env.ErrorCategory == "tail")
-            {
-                problems.Add("tail ErrorCategory is impossible outside S1");
+                problems.Add("ERROR envelope uses an unknown ErrorCategory");
                 ok = false;
             }
         }
         return ok;
     }
+
 }

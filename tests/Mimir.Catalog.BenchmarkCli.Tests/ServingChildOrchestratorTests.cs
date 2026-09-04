@@ -331,4 +331,81 @@ public class ServingChildOrchestratorTests : IDisposable
         Assert.Contains("parent_samples", executionJson);
         Assert.Contains("watchdog_seconds", executionJson);
     }
+    [Fact]
+    public async Task InvalidEnvelope_NeverContainsMeasuredError()
+    {
+        using var s1 = NewSession();
+        var r1 = await Run(s1, Workload(2), Process(ProcessOutcome.CompletedProtocolResult, Envelope("INVALID")),
+            sampleProducer: p => ServingSampleArtifact.WriteCreateNew(p, new[] { Sample(1, "INVALID", card: 0, digest: "other"), Sample(2, "ERROR", error: "boom") }));
+        Assert.False(r1.EvidenceValid);
+        Assert.Contains(r1.EvidenceProblems, x => x.Contains("INVALID envelope must never contain measured ERROR"));
+
+        using var s2 = NewSession();
+        var r2 = await Run(s2, Workload(2), Process(ProcessOutcome.CompletedProtocolResult, Envelope("INVALID")),
+            sampleProducer: p => ServingSampleArtifact.WriteCreateNew(p, new[] { Sample(1, "INVALID", card: 0, digest: "other") }));
+        Assert.False(r2.EvidenceValid); // partial INVALID sequence impossible
+    }
+
+    [Fact]
+    public async Task TimedError_MustBeSingleFinalSample()
+    {
+        // ERROR followed by a later sample -> invalid
+        using var s1 = NewSession();
+        var r1 = await Run(s1, Workload(3), Process(ProcessOutcome.CompletedProtocolResult, Envelope("ERROR", "timed-probe", "boom")),
+            sampleProducer: p => ServingSampleArtifact.WriteCreateNew(p, new[] { Sample(1), Sample(2, "ERROR", error: "boom"), Sample(3) }));
+        Assert.False(r1.EvidenceValid);
+
+        // Multiple ERROR samples -> invalid
+        using var s2 = NewSession();
+        var r2 = await Run(s2, Workload(2), Process(ProcessOutcome.CompletedProtocolResult, Envelope("ERROR", "timed-probe", "boom")),
+            sampleProducer: p => ServingSampleArtifact.WriteCreateNew(p, new[] { Sample(1, "ERROR", error: "boom"), Sample(2, "ERROR", error: "boom") }));
+        Assert.False(r2.EvidenceValid);
+
+        // Earlier INVALID + final ERROR -> valid
+        using var s3 = NewSession();
+        var r3 = await Run(s3, Workload(2), Process(ProcessOutcome.CompletedProtocolResult, Envelope("ERROR", "timed-probe", "boom")),
+            sampleProducer: p => ServingSampleArtifact.WriteCreateNew(p, new[] { Sample(1, "INVALID", card: 0, digest: "other"), Sample(2, "ERROR", error: "boom") }));
+        Assert.True(r3.EvidenceValid);
+    }
+
+    [Fact]
+    public async Task ActiveResourceValid_Unstable_FailsClosed()
+    {
+        using var s = NewSession();
+        string resourceRel = "serving/S1/rep-1/resource-time.txt";
+        var r = await Run(s, Workload(1), TimeoutProcess(wrapperObserved: false),
+            sampleProducer: p => ServingSampleArtifact.WriteCreateNew(p, new[] { Sample(1) }));
+        Assert.False(r.EvidenceValid);
+        Assert.False(r.RegisteredStableArtifacts);
+        Assert.DoesNotContain(sessionArtifacts(s), rel => rel == resourceRel);
+        Assert.Contains(r.EvidenceProblems, x => x.Contains("not stable"));
+    }
+
+    [Fact]
+    public async Task StableResource_RegistrationFailure_CaptureFalse()
+    {
+        using var s = NewSession();
+        string resourceRel = "serving/S1/rep-1/resource-time.txt";
+        string resourcePhysical = ResourcePhysical(s);
+        var r = await ServingChildOrchestrator.RunAsync(
+            s, "S1", 1, "/fixture/candidate.db", "/fixture/workload", Workload(1),
+            reqPath => ProcessInvocation.BenchmarkChild("/fixture/child.exe", reqPath),
+            TimeSpan.FromSeconds(3600),
+            (_, rp, _, _) =>
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(rp)!);
+                File.WriteAllText(rp, "1  maximum resident set size\n");
+                s.RegisterExisting(resourceRel); // pre-register to force duplicate on orchestrator attempt
+                return Task.FromResult(new ResourceMeasuredProcessResult
+                {
+                    ProcessResult = Process(ProcessOutcome.ProcessCrashOrNonzeroExit, env: null, exitCode: 3),
+                    ResourceStatus = ResourceMeasurementStatus.Error,
+                    ExternalPeakRssBytes = null,
+                    ResourceOutputPath = resourcePhysical,
+                });
+            });
+        Assert.False(r.EvidenceValid);
+        Assert.False(r.RegisteredStableArtifacts);
+    }
 }
+
