@@ -365,6 +365,15 @@ public static class G2ChildOrchestrator
 
         void Bad(string reason) { problems.Add(reason); ok = false; }
 
+        // Cross-binding invariant for any timed evidence: the envelope
+        // correctness claim must exactly equal the raw Batch correctness claim.
+        if (rawBatch is not null && env.CorrectnessStatus != rawBatch.CorrectnessStatus)
+        {
+            problems.Add($"envelope CorrectnessStatus '{env.CorrectnessStatus}' does not match raw Batch correctness '{rawBatch.CorrectnessStatus}'");
+            ok = false;
+            return ok;
+        }
+
         bool batchWallEquals(double? wall) => rawBatch is not null && wall is { } w && w == rawBatch.WallSeconds;
         bool resultEqualsRaw() => rawBatch is not null
             && env.ResultCardinality == rawBatch.ActualCardinality

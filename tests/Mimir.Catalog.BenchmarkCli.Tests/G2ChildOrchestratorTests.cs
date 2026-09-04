@@ -246,6 +246,40 @@ public class G2ChildOrchestratorTests : IDisposable
     }
 
     [Fact]
+    public async Task EnvelopeValid_RawBatchInvalid_MismatchRejected()
+    {
+        using var s = NewSession();
+        var r = await Run(s, Workload(), Process(ProcessOutcome.CompletedProtocolResult,
+            Envelope("VALID", wall: 10.0, card: 3, digest: "wrong")),
+            sampleProducer: p => WriteArtifact(p, new[] { RawValid(0), RawInvalid(1), RawValid(2) }, RawBatch(status: "INVALID", digest: "wrong")));
+        Assert.False(r.EvidenceValid);
+        Assert.Contains(r.EvidenceProblems, x => x.Contains("does not match raw Batch correctness"));
+    }
+
+    [Fact]
+    public async Task EnvelopeInvalid_RawBatchValid_MismatchRejected()
+    {
+        using var s = NewSession();
+        var r = await Run(s, Workload(), Process(ProcessOutcome.CompletedProtocolResult,
+            Envelope("INVALID", wall: 10.0, card: 3, digest: BatchDigest())),
+            sampleProducer: p => WriteArtifact(p, ValidInputs(3), RawBatch()));
+        Assert.False(r.EvidenceValid);
+        Assert.Contains(r.EvidenceProblems, x => x.Contains("does not match raw Batch correctness"));
+    }
+
+    [Fact]
+    public async Task EnvelopeValid_RawBatchError_MismatchRejected()
+    {
+        using var s = NewSession();
+        var r = await Run(s, Workload(), Process(ProcessOutcome.CompletedProtocolResult,
+            Envelope("VALID", wall: 10.0, card: 3, digest: BatchDigest())),
+            sampleProducer: p => WriteArtifact(p, new[] { RawValid(0), RawError(1, "boom"), RawValid(2) },
+                RawBatch(status: "ERROR", card: null, digest: null, error: "boom")));
+        Assert.False(r.EvidenceValid);
+        Assert.Contains(r.EvidenceProblems, x => x.Contains("does not match raw Batch correctness"));
+    }
+
+    [Fact]
     public async Task ExplicitNullInArtifact_Malformed()
     {
         using var s = NewSession();
