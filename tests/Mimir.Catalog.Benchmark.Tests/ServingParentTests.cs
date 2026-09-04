@@ -99,4 +99,35 @@ public class ServingSampleParserTests
         var neg = Line(Good()).Replace("wall_seconds\":0.5", "wall_seconds\":-1");
         Assert.ThrowsAny<ServingSampleParseException>(() => ServingSampleParser.Parse(Encoding.UTF8.GetBytes(neg + "\n")));
     }
+
+    [Theory]
+    [InlineData("{\"operation\":\"S1\",\"sequence\":1,\"stratum\":\"Hit\",\"wall_seconds\":0.5,\"correctness_status\":\"VALID\",\"actual_cardinality\":1,\"actual_digest\":\"abc\"}")] // no final LF
+    public void Parse_WriterConventionViolations_Rejected(string line)
+    {
+        Assert.ThrowsAny<ServingSampleParseException>(() =>
+            ServingSampleParser.Parse(Encoding.UTF8.GetBytes(line)));
+    }
+
+    [Fact]
+    public void Parse_MissingRequired_Rejected()
+    {
+        const string good = "{\"operation\":\"S1\",\"sequence\":1,\"stratum\":\"Hit\",\"wall_seconds\":0.5,\"correctness_status\":\"VALID\",\"actual_cardinality\":1,\"actual_digest\":\"abc\"}";
+        var parsed = ServingSampleParser.Parse(Encoding.UTF8.GetBytes(good + "\n"));
+        Assert.Single(parsed);
+        string noWall = good.Replace(",\"wall_seconds\":0.5", "", StringComparison.Ordinal);
+        Assert.ThrowsAny<ServingSampleParseException>(() => ServingSampleParser.Parse(Encoding.UTF8.GetBytes(noWall + "\n")));
+        string noSeq = good.Replace(",\"sequence\":1", "", StringComparison.Ordinal);
+        Assert.ThrowsAny<ServingSampleParseException>(() => ServingSampleParser.Parse(Encoding.UTF8.GetBytes(noSeq + "\n")));
+        string noOp = good.Replace("\"operation\":\"S1\",", "", StringComparison.Ordinal);
+        Assert.ThrowsAny<ServingSampleParseException>(() => ServingSampleParser.Parse(Encoding.UTF8.GetBytes(noOp + "\n")));
+    }
+
+    [Fact]
+    public void Parse_InvalidUtf8_AndCrlf_Rejected()
+    {
+        byte[] invalid = { 0x7B, 0x22, 0x61, 0x22, 0x3A, 0xFF, 0x7D }; // raw 0xFF in JSON
+        Assert.ThrowsAny<ServingSampleParseException>(() => ServingSampleParser.Parse(invalid));
+        string crlf = Line(Good()).Replace("\n", "\r\n", StringComparison.Ordinal);
+        Assert.ThrowsAny<ServingSampleParseException>(() => ServingSampleParser.Parse(Encoding.UTF8.GetBytes(crlf)));
+    }
 }
